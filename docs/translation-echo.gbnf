@@ -1,0 +1,16 @@
+# Translation output grammar (echo mode)
+# Output: JSON array of { ids: [int, ...], input: string, text: string|null, start: int, end: int }
+
+root ::= ws "[" ws entry ("," ws entry)* ws "]" ws
+
+entry ::= "{" ws "\"ids\"" ws ":" ws ids ws "," ws "\"input\"" ws ":" ws any-string ws "," ws "\"text\"" ws ":" ws text-value ws "," ws "\"start\"" ws ":" ws integer ws "," ws "\"end\"" ws ":" ws integer ws "}"
+
+ids ::= "[" ws integer ("," ws integer)* ws "]"
+
+text-value ::= "null" | any-string
+
+integer ::= "0" | [1-9] [0-9]*
+
+any-string ::= "\"" ([^"\\\x7F\x00-\x1F] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]))* "\""
+
+ws ::= [ \t\n\r]*

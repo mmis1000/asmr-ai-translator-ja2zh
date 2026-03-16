@@ -1,0 +1,21 @@
+# Phase 3: Glossary translation grammar
+# Output: { cv: [...], circles: [...], terms: [...] }
+# No thinking-block — uses instruct model
+
+root ::= ws obj ws
+
+obj ::= "{" ws "\"cv\"" ws ":" ws glossary-array ws "," ws "\"characters\"" ws ":" ws glossary-array ws "," ws "\"circles\"" ws ":" ws glossary-array ws "," ws "\"terms\"" ws ":" ws glossary-array ws "}"
+
+glossary-item ::= (
+  "{" ws
+  "\"ja\"" ws ":" ws any-string ws "," ws
+  "\"zh\"" ws ":" ws zh-string
+  ("," ws "\"note\"" ws ":" ws any-string)?
+  ws "}"
+)
+glossary-array ::= "[]" | ("[" ws glossary-item ("," ws glossary-item)* ws "]")
+
+zh-string  ::= "\"" ([^"\\\x7F\x00-\x1Fぁ-ヿ] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]))* "\""
+any-string ::= "\"" ([^"\\\x7F\x00-\x1F]       | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]))* "\""
+
+ws ::= [ \t\n\r]*

@@ -1,0 +1,42 @@
+# Phase 1: Japanese-only metadata extraction grammar
+# Output: { asr: { prompt }, ja: { title, circle, cv_list, character_list, track_list, summary, term_list } }
+
+thinking-char    ::= [^<] | "<" [^/] | "</" [^t] | "</t" [^h] | "</th" [^i] | "</thi" [^n] | "</thin" [^k] | "</think" [^>] | "\n"
+thinking-content ::= thinking-char*
+thinking-block   ::= "<think>" "\n"* thinking-content "</think>" "\n"*
+
+root ::= thinking-block? ws obj ws
+
+obj ::= "{" ws "\"asr\"" ws ":" ws asr-obj ws "," ws "\"ja\"" ws ":" ws ja-obj ws "}"
+
+asr-obj ::= "{" ws "\"prompt\"" ws ":" ws asr-string ws "}"
+
+ja-obj ::= (
+  "{" ws
+  "\"title\""          ws ":" ws any-string  ws "," ws
+  "\"circle\""         ws ":" ws any-string  ws "," ws
+  "\"cv_list\""        ws ":" ws cv-list     ws "," ws
+  "\"character_list\"" ws ":" ws char-list   ws "," ws
+  "\"track_list\""     ws ":" ws track-list  ws "," ws
+  "\"summary\""        ws ":" ws any-string  ws "," ws
+  "\"term_list\""      ws ":" ws term-list   ws
+  "}"
+)
+
+cv-item   ::= "{" ws "\"name\"" ws ":" ws any-string ("," ws "\"role\"" ws ":" ws any-string)? ws "}"
+cv-list   ::= "[]" | ("[" ws cv-item   ("," ws cv-item)*   ws "]")
+
+char-item ::= "{" ws "\"name\"" ws ":" ws any-string ("," ws "\"note\"" ws ":" ws any-string)? ws "}"
+char-list ::= "[]" | ("[" ws char-item ("," ws char-item)* ws "]")
+
+track-item   ::= "{" ws "\"number\"" ws ":" ws track-number ws "," ws "\"title\"" ws ":" ws any-string ws "}"
+track-list   ::= "[]" | ("[" ws track-item ("," ws track-item)* ws "]")
+track-number ::= "\"" [0-9]+ "\"" | [0-9]+
+
+term-item ::= "{" ws "\"ja\"" ws ":" ws any-string ("," ws "\"note\"" ws ":" ws any-string)? ws "}"
+term-list ::= "[]" | ("[" ws term-item ("," ws term-item)* ws "]")
+
+asr-string ::= "\"" ([^"\\\x7F\x00-\x1F○◯〇●◎■□▲△×*※()【】♪★☆♡♥] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]))* "\""
+any-string ::= "\"" ([^"\\\x7F\x00-\x1F] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]))* "\""
+
+ws ::= [ \t\n\r]*

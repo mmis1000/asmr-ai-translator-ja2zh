@@ -1,0 +1,15 @@
+# Phase 4b: Prose translation grammar
+# Output: { title, track_list: [{number, zh}], summary }
+# No thinking-block — uses instruct model
+
+root ::= ws obj ws
+
+obj ::= "{" ws "\"title\"" ws ":" ws zh-string ws "," ws "\"track_list\"" ws ":" ws track-array ws "," ws "\"summary\"" ws ":" ws zh-string ws "}"
+
+track-item   ::= "{" ws "\"number\"" ws ":" ws track-number ws "," ws "\"zh\"" ws ":" ws zh-string ws "}"
+track-array  ::= "[]" | ("[" ws track-item ("," ws track-item)* ws "]")
+track-number ::= "\"" [0-9]+ "\"" | [0-9]+
+
+zh-string ::= "\"" ([^"\\\x7F\x00-\x1Fぁ-ヿ] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]))* "\""
+
+ws ::= [ \t\n\r]*

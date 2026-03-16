@@ -1,0 +1,388 @@
+#!/usr/bin/env node
+
+import fs from "fs/promises";
+import path from "path";
+import { parseArgs } from "node:util";
+import { fileURLToPath } from "url";
+import { type TranslatorConfig, DEFAULT_CONFIG } from "./config.js";
+import { LlamaServerManager } from "./server/llama-server-manager.js";
+import { LlmClient } from "./server/llm-client.js";
+import { cleanTranscript } from "./pipeline/transcript-cleaner.js";
+import { asrToSegments, translateTrack } from "./pipeline/translator.js";
+import { getTranscription } from "./pipeline/asr-runner.js";
+import { fetchDlsiteMetadata, parseDlsiteId } from "./pipeline/fetch-metadata.js";
+import { MetadataExtractor } from "./pipeline/metadata-extractor.js";
+import { writeTranscription, writeTranslation, writeMetadata } from "./pipeline/output-writer.js";
+import type { AudioTrack, GlossaryLang, UserMetadata, FinalMetadata } from "./util/types.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DOCS_DIR = path.resolve(__dirname, "../docs");
+
+// ── CLI argument parsing ─────────────────────────────────────────────────────
+
+function printUsage(): void {
+  console.log(`
+asmr-translator — Translate Japanese ASMR audio using a GGUF model
+
+Usage:
+  npx asmr-translator --input <dir> --output <dir> --model <path> [options]
+
+Required:
+  --input <dir>            Local directory of audio files
+  --output <dir>           Output directory (separate from input)
+  --model <path>           Fine-tuned translation GGUF model (required unless --server-url)
+
+Metadata (optional, pick one):
+  --dlsite <id|url>        DLSite work ID or URL — scrapes metadata for context
+  --metadata <file>        User-supplied metadata JSON
+
+Metadata extraction (requires a general-purpose model, NOT the translation model):
+  --meta-model <path>      GGUF model for metadata extraction (used with --dlsite)
+  --meta-server-url <url>  External server URL for metadata extraction
+
+Translation server:
+  --llama-server <path>    llama-server executable (default: in PATH)
+  --server-url <url>       External llama-server URL for translation
+  --port <number>          Translation server port (default: 8181)
+  --gpu-layers <number>    GPU layers (default: 99)
+  --ctx-size <number>      Context size (default: 8192)
+  --parallel <number>      Parallel inference slots (default: 1)
+
+Translation:
+  --lang <zh-tw|zh-cn>     Target language (default: zh-tw)
+  --mode <base|echo>       Translation mode (default: echo)
+
+ASR:
+  --asr <python|skip>      ASR mode (default: skip)
+  --python-exe <path>      Python executable (default: python)
+  --asr-script <path>      Path to asr_cli.py
+
+Note: --dlsite with LLM extraction requires --meta-model or --meta-server-url.
+      Without these, --dlsite still scrapes DLSite for basic metadata (title, VA,
+      description) but won't produce a structured glossary.
+  `);
+}
+
+function parseCliArgs(): TranslatorConfig {
+  const { values } = parseArgs({
+    options: {
+      input:             { type: "string" },
+      output:            { type: "string" },
+      model:             { type: "string" },
+      dlsite:            { type: "string" },
+      metadata:          { type: "string" },
+      "meta-model":      { type: "string" },
+      "meta-server-url": { type: "string" },
+      "llama-server":    { type: "string" },
+      "server-url":      { type: "string" },
+      port:              { type: "string" },
+      "gpu-layers":      { type: "string" },
+      "ctx-size":        { type: "string" },
+      parallel:          { type: "string" },
+      lang:              { type: "string" },
+      mode:              { type: "string" },
+      asr:               { type: "string" },
+      "python-exe":      { type: "string" },
+      "asr-script":      { type: "string" },
+      help:              { type: "boolean", short: "h" },
+    },
+    strict: true,
+  });
+
+  if (values.help) {
+    printUsage();
+    process.exit(0);
+  }
+
+  if (!values.input) { console.error("Error: --input is required"); printUsage(); process.exit(1); }
+  if (!values.output) { console.error("Error: --output is required"); printUsage(); process.exit(1); }
+  if (!values.model && !values["server-url"]) {
+    console.error("Error: --model is required (unless --server-url is provided)");
+    printUsage();
+    process.exit(1);
+  }
+
+  const lang = values.lang as "zh-tw" | "zh-cn" | undefined;
+  if (lang && lang !== "zh-tw" && lang !== "zh-cn") {
+    console.error("Error: --lang must be 'zh-tw' or 'zh-cn'"); process.exit(1);
+  }
+
+  const mode = values.mode as "base" | "echo" | undefined;
+  if (mode && mode !== "base" && mode !== "echo") {
+    console.error("Error: --mode must be 'base' or 'echo'"); process.exit(1);
+  }
+
+  const asrMode = values.asr as "python" | "skip" | undefined;
+  if (asrMode && asrMode !== "python" && asrMode !== "skip") {
+    console.error("Error: --asr must be 'python' or 'skip'"); process.exit(1);
+  }
+
+  return {
+    ...DEFAULT_CONFIG,
+    inputDir: path.resolve(values.input),
+    outputDir: path.resolve(values.output),
+    modelPath: values.model ? path.resolve(values.model) : "",
+    dlsiteId: values.dlsite,
+    metadataFile: values.metadata ? path.resolve(values.metadata) : undefined,
+    metaModelPath: values["meta-model"] ? path.resolve(values["meta-model"]) : undefined,
+    metaServerUrl: values["meta-server-url"],
+    llamaServerExe: values["llama-server"] ?? DEFAULT_CONFIG.llamaServerExe,
+    serverUrl: values["server-url"],
+    serverPort: values.port ? parseInt(values.port, 10) : DEFAULT_CONFIG.serverPort,
+    gpuLayers: values["gpu-layers"] ? parseInt(values["gpu-layers"], 10) : DEFAULT_CONFIG.gpuLayers,
+    contextSize: values["ctx-size"] ? parseInt(values["ctx-size"], 10) : DEFAULT_CONFIG.contextSize,
+    parallel: values.parallel ? parseInt(values.parallel, 10) : DEFAULT_CONFIG.parallel,
+    locale: lang ?? DEFAULT_CONFIG.locale,
+    mode: mode ?? DEFAULT_CONFIG.mode,
+    asrMode: asrMode ?? DEFAULT_CONFIG.asrMode,
+    pythonExe: values["python-exe"] ?? DEFAULT_CONFIG.pythonExe,
+    asrScript: values["asr-script"],
+  };
+}
+
+// ── Audio discovery ──────────────────────────────────────────────────────────
+
+const AUDIO_EXTS = new Set([".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac"]);
+
+async function discoverAudioTracks(inputDir: string): Promise<AudioTrack[]> {
+  const tracks: AudioTrack[] = [];
+
+  async function walk(dir: string, relDir: string) {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const absPath = path.join(dir, entry.name);
+      const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        await walk(absPath, rel);
+      } else if (entry.isFile()) {
+        const ext = path.extname(entry.name).toLowerCase();
+        if (AUDIO_EXTS.has(ext)) {
+          tracks.push({
+            absolutePath: absPath,
+            relativePath: rel,
+            stem: path.basename(entry.name, ext),
+            relativeDir: relDir,
+          });
+        }
+      }
+    }
+  }
+
+  await walk(inputDir, "");
+  return tracks;
+}
+
+// ── Main pipeline ────────────────────────────────────────────────────────────
+
+async function main() {
+  const config = parseCliArgs();
+
+  console.log(`=== asmr-translator ===`);
+  console.log(`Input:    ${config.inputDir}`);
+  console.log(`Output:   ${config.outputDir}`);
+  console.log(`Language: ${config.locale}`);
+  console.log(`Mode:     ${config.mode}`);
+  console.log(`ASR:      ${config.asrMode}`);
+  console.log();
+
+  // ── Step 1: Discover audio tracks ────────────────────────────────────────
+
+  const tracks = await discoverAudioTracks(config.inputDir);
+  if (tracks.length === 0) {
+    console.error("No audio files found in input directory.");
+    process.exit(1);
+  }
+  console.log(`Found ${tracks.length} audio track(s)`);
+
+  // ── Step 2: Resolve metadata ─────────────────────────────────────────────
+
+  let glossary: GlossaryLang = { cvs: [], characters: [], terms: [], summary: "" };
+  let outputMetadata: FinalMetadata | UserMetadata = {};
+
+  if (config.dlsiteId) {
+    const dlsiteId = parseDlsiteId(config.dlsiteId);
+    const dlsite = await fetchDlsiteMetadata(dlsiteId);
+
+    const hasMetaModel = config.metaModelPath || config.metaServerUrl;
+
+    if (dlsite.metadataMd && hasMetaModel) {
+      // Full LLM extraction using a separate general-purpose model
+      const fileList = tracks.map(t => `- ${t.relativePath}`).join("\n");
+      const fullMd = dlsite.metadataMd + `\n# File List\n\n${fileList}\n`;
+
+      const metaServer = new LlamaServerManager({
+        llamaServerExe: config.llamaServerExe,
+        modelPath: config.metaModelPath ?? "",
+        serverPort: config.metaServerPort,
+        gpuLayers: config.gpuLayers,
+        contextSize: config.contextSize,
+        parallel: 1,
+        serverUrl: config.metaServerUrl,
+      }, "MetaServer");
+
+      try {
+        await metaServer.start();
+        const metaClient = new LlmClient(metaServer.baseUrl, config);
+        const extractor = new MetadataExtractor(metaClient, config.locale);
+        const result = await extractor.extract(fullMd);
+        glossary = result.glossary;
+        outputMetadata = result.metadata;
+      } finally {
+        await metaServer.stop();
+      }
+    } else if (dlsite.metadataMd) {
+      // Scrape-only fallback: build basic metadata without LLM
+      console.log(`[Metadata] No --meta-model provided. Using scraped metadata only (no glossary extraction).`);
+      outputMetadata = {
+        title: dlsite.title,
+        summary: dlsite.description,
+        glossary: {
+          // Use VA names as basic CV entries (Japanese only, no translation)
+          cvs: dlsite.va
+            ? dlsite.va.split(/[,、／/]/).map(v => v.trim()).filter(Boolean).map(v => ({ ja: v, zh: v }))
+            : [],
+          characters: [],
+          terms: [],
+        },
+      } satisfies UserMetadata;
+      glossary = {
+        cvs: (outputMetadata as UserMetadata).glossary?.cvs ?? [],
+        characters: [],
+        terms: [],
+        summary: dlsite.description ?? "",
+      };
+    }
+  } else if (config.metadataFile) {
+    const raw = await fs.readFile(config.metadataFile, "utf-8");
+    const userMeta = JSON.parse(raw) as UserMetadata;
+    outputMetadata = userMeta;
+    glossary = {
+      cvs: userMeta.glossary?.cvs ?? [],
+      characters: userMeta.glossary?.characters ?? [],
+      terms: userMeta.glossary?.terms ?? [],
+      summary: userMeta.summary ?? "",
+    };
+    console.log(`[Metadata] Loaded user-supplied metadata`);
+  } else {
+    console.log(`[Metadata] No metadata source — translating without glossary/context`);
+  }
+
+  await writeMetadata(config.outputDir, outputMetadata);
+
+  // ── Step 3: ASR transcription (all tracks, before starting LLM server) ──
+
+  interface TrackWithTranscript {
+    track: AudioTrack;
+    cleaned: import("./util/types.js").TranscriptSegment[];
+  }
+  const readyTracks: TrackWithTranscript[] = [];
+  let skipped = 0;
+
+  const asrPrompt = "asr" in outputMetadata
+    ? (outputMetadata as FinalMetadata).asr.prompt
+    : undefined;
+
+  for (const track of tracks) {
+    console.log(`\n[ASR ${readyTracks.length + skipped + 1}/${tracks.length}] ${track.relativePath}`);
+
+    const transcript = await getTranscription(track, config.outputDir, {
+      asrMode: config.asrMode,
+      pythonExe: config.pythonExe,
+      asrScript: config.asrScript,
+      asrPrompt,
+    });
+
+    if (!transcript) {
+      console.log(`  Skipped (no transcription)`);
+      skipped++;
+      continue;
+    }
+
+    const cleaned = cleanTranscript(transcript);
+    if (cleaned.length === 0) {
+      console.log(`  Skipped (all segments garbled)`);
+      skipped++;
+      continue;
+    }
+    console.log(`  ${cleaned.length} clean segments (${transcript.segments.length - cleaned.length} garbled removed)`);
+
+    await writeTranscription(config.outputDir, track.relativeDir, track.stem, cleaned);
+    readyTracks.push({ track, cleaned });
+  }
+
+  if (readyTracks.length === 0) {
+    console.log(`\nNo tracks to translate.`);
+    return;
+  }
+
+  // ── Step 4: Start translation server (ASR is done, GPU is free) ─────────
+
+  const server = new LlamaServerManager({
+    llamaServerExe: config.llamaServerExe,
+    modelPath: config.modelPath,
+    serverPort: config.serverPort,
+    gpuLayers: config.gpuLayers,
+    contextSize: config.contextSize,
+    parallel: config.parallel,
+    serverUrl: config.serverUrl,
+  }, "TranslateServer");
+
+  await server.start();
+  const client = new LlmClient(server.baseUrl, config);
+
+  const grammarFile = config.mode === "echo" ? "translation-echo.gbnf" : "translation-base.gbnf";
+  const grammar = await fs.readFile(path.join(DOCS_DIR, grammarFile), "utf-8");
+
+  // ── Step 5: Translate each track ────────────────────────────────────────
+
+  let processed = 0;
+
+  try {
+    for (const { track, cleaned } of readyTracks) {
+      console.log(`\n[Translate ${processed + 1}/${readyTracks.length}] ${track.relativePath}`);
+
+      const segments = asrToSegments(cleaned);
+      const trackName = track.relativePath;
+
+      try {
+        const entries = await translateTrack(segments, glossary, trackName, config, client, grammar);
+
+        if (entries.length === 0) {
+          console.log(`  Skipped (translation produced no output)`);
+          skipped++;
+          continue;
+        }
+
+        await writeTranslation(config.outputDir, track.relativeDir, track.stem, entries);
+        console.log(`  Done: ${entries.length} translated entries`);
+        processed++;
+      } catch (err: any) {
+        // Track-level error: log and continue with next track
+        console.error(`  ERROR: ${err.message}`);
+
+        // Check if server is still alive, force restart if needed
+        const healthy = await client.healthCheck();
+        if (!healthy) {
+          console.error(`  Server unresponsive, force restarting...`);
+          await server.forceRestart();
+        }
+        skipped++;
+      }
+    }
+
+    // ── Summary ──────────────────────────────────────────────────────────
+
+    console.log(`\n=== Complete ===`);
+    console.log(`Processed: ${processed}`);
+    console.log(`Skipped:   ${skipped}`);
+    console.log(`Output:    ${config.outputDir}`);
+
+  } finally {
+    await server.stop();
+  }
+}
+
+main().catch((err) => {
+  console.error("Fatal error:", err);
+  process.exit(1);
+});

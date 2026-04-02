@@ -1,6 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import type { TranscriptSegment, TranslationEntry, FinalMetadata, UserMetadata } from "../util/types.js";
+import type { WindowResult } from "./translator.js";
 import { toLrc, toVtt } from "./subtitle-exporter.js";
 
 /** Ensure a directory exists, creating it recursively if needed. */
@@ -19,7 +20,7 @@ export async function writeTranscription(
   await ensureDir(dir);
   await fs.writeFile(
     path.join(dir, `${stem}.transcription.json`),
-    JSON.stringify(segments, null, 2),
+    JSON.stringify({ segments }, null, 2),
     "utf-8",
   );
 }
@@ -51,6 +52,22 @@ export async function writeTranslation(
       "utf-8",
     ),
   ]);
+}
+
+/** Write per-window LLM intermediates for debugging (raw output + parsed entries). */
+export async function writeWindowResults(
+  outputDir: string,
+  relativeDir: string,
+  stem: string,
+  windowResults: WindowResult[],
+): Promise<void> {
+  const dir = path.join(outputDir, relativeDir);
+  await ensureDir(dir);
+  await fs.writeFile(
+    path.join(dir, `${stem}.windows.json`),
+    JSON.stringify(windowResults, null, 2),
+    "utf-8",
+  );
 }
 
 /** Write metadata.json at the output root. */

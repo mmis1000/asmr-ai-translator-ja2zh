@@ -2,12 +2,15 @@ import { spawn, type ChildProcess } from "child_process";
 
 export interface ServerConfig {
   llamaServerExe: string;
-  modelPath: string;
+  modelPath: string;                    // local GGUF path; ignored when hfRepo is set
+  hfRepo?: string | undefined;          // HuggingFace repo "user/model[:quant]"; takes priority over modelPath
   serverPort: number;
-  gpuLayers: number;
+  gpuLayers: number | "auto" | "all";
   contextSize: number;
   parallel: number;
   serverUrl?: string | undefined;
+  /** Startup timeout in ms. Defaults to 5 min for local models, 30 min for HF repos (download time). */
+  startupTimeoutMs?: number | undefined;
 }
 
 export class LlamaServerManager {
@@ -38,7 +41,9 @@ export class LlamaServerManager {
     this.isStopping = false;
 
     const args = [
-      "-m", this.config.modelPath,
+      ...(this.config.hfRepo
+        ? ["-hfr", this.config.hfRepo]
+        : ["-m", this.config.modelPath]),
       "--ctx-size", String(this.config.contextSize),
       "--gpu-layers", String(this.config.gpuLayers),
       "--host", "127.0.0.1",
@@ -47,7 +52,7 @@ export class LlamaServerManager {
       "--kv-unified",
       "--keep", "-1",
       "-fa", "on",
-      "--context-shift",
+      "--no-context-shift",  // Qwen3.5 hybrid SSM architecture crashes with --context-shift (seq_add assertion)
       "--cache-type-k", "q8_0",
       "--cache-type-v", "q8_0",
     ];
@@ -106,12 +111,13 @@ export class LlamaServerManager {
         }
       });
 
+      const defaultTimeout = this.config.hfRepo ? 30 * 60 * 1000 : 5 * 60 * 1000;
       setTimeout(() => {
         if (!isReady) {
           reject(new Error(`Timeout waiting for ${this.label} to be ready.`));
           this.stop();
         }
-      }, 60000);
+      }, this.config.startupTimeoutMs ?? defaultTimeout);
     });
   }
 

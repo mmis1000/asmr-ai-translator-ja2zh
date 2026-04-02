@@ -56,7 +56,10 @@ export class MetadataExtractor {
 
     const user = `---\nMETADATA:\n${metadataMd}\n---`;
     const prompt = buildChatPromptWithSystem(this.pass1System, user, false);
-    const raw = await this.client.complete(prompt, { grammar: this.pass1Grammar });
+    // Thinking is enabled for Phase 1 — allow up to 20 minutes for reasoning + output
+    // Phase 1 uses thinking — lower temperature (0.6) keeps thinking chains short and stable.
+    // Higher temperatures cause the model to think indefinitely, filling nPredict.
+    const raw = await this.client.complete(prompt, { grammar: this.pass1Grammar, temperature: 0.6, nPredict: 14000, timeoutMs: 20 * 60 * 1000 });
     return JSON.parse(extractJsonObject(raw)) as Pass1Output;
   }
 
@@ -92,7 +95,7 @@ export class MetadataExtractor {
     };
 
     const prompt = buildChatPromptWithSystem(sys, JSON.stringify(input, null, 2), true);
-    const raw = await this.client.complete(prompt, { grammar: this.pass3Grammar, temperature: 0.3 });
+    const raw = await this.client.complete(prompt, { grammar: this.pass3Grammar, temperature: 0.7, timeoutMs: 10 * 60 * 1000 });
 
     type GlossaryRow = { ja: string; zh: string; note?: string };
     const toEntry = (item: GlossaryRow): GlossaryTranslatedEntry =>
@@ -153,7 +156,7 @@ export class MetadataExtractor {
       .replace(/\{\{PROSE_INPUT_JSON\}\}/g, JSON.stringify(proseInput, null, 2));
 
     const prompt = buildChatPromptWithSystem(sysWithContext, "", true);
-    const raw = await this.client.complete(prompt, { grammar: this.pass4Grammar, temperature: 0.3 });
+    const raw = await this.client.complete(prompt, { grammar: this.pass4Grammar, temperature: 0.7, timeoutMs: 10 * 60 * 1000 });
     return JSON.parse(extractJsonObject(raw)) as Pass4bOutput;
   }
 

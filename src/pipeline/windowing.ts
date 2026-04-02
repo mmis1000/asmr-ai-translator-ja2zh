@@ -4,9 +4,13 @@ import { formatTranscriptionJson } from "./prompt-builder.js";
 // Character-budget windowing: grow each window until the estimated total
 // character count (fixed prompt overhead + transcription JSON) exceeds MAX_CHARS.
 //
-// Qwen3 tokenizer: CJK ≈ 2 chars/token → MAX_CHARS=5000 ≈ 2500 tokens,
-// leaving headroom inside max_seq_len=4096.
-const MAX_CHARS = 5000;
+// The training pipeline (instruct-dataset-pipeline.ts) uses MAX_CHARS=5000 for the
+// COMBINED input+output budget per window (~3500 tokens at ~1.4 chars/token).
+// At inference we only count input here, so we use half that budget so the
+// combined (input + translation output) stays within max-seq-len=4096.
+// Measured ~1.6 chars/token for this content → MAX_CHARS=2500 ≈ 1562 input tokens,
+// leaving ~2534 tokens for output within 4096.
+const MAX_CHARS = 2500;
 const MIN_WINDOW = 3;
 
 export interface InferenceWindow {

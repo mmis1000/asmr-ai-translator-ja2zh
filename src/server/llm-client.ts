@@ -44,7 +44,7 @@ export function extractJsonArray(raw: string): string {
 export class LlmClient {
   constructor(
     private baseUrl: string,
-    private config: Pick<TranslatorConfig, "temperature" | "topP" | "topK" | "minP">,
+    private config: Pick<TranslatorConfig, "temperature" | "topP" | "topK" | "minP" | "repeatPenalty">,
   ) {}
 
   /** Check if the server is responsive. */
@@ -100,6 +100,7 @@ export class LlmClient {
       top_p: this.config.topP,
       top_k: this.config.topK,
       min_p: this.config.minP,
+      repeat_penalty: this.config.repeatPenalty,
       n_predict: options?.nPredict ?? 8192,
       stop: STOP,
     };

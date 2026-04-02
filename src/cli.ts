@@ -3,7 +3,6 @@
 import fs from "fs/promises";
 import path from "path";
 import { parseArgs } from "node:util";
-import { fileURLToPath } from "url";
 import { type TranslatorConfig, DEFAULT_CONFIG } from "./config.js";
 import { LlamaServerManager } from "./server/llama-server-manager.js";
 import { LlmClient } from "./server/llm-client.js";
@@ -12,11 +11,9 @@ import { asrToSegments, translateTrack } from "./pipeline/translator.js";
 import { getTranscription } from "./pipeline/asr-runner.js";
 import { fetchDlsiteMetadata, parseDlsiteId } from "./pipeline/fetch-metadata.js";
 import { MetadataExtractor } from "./pipeline/metadata-extractor.js";
-import { writeTranscription, writeTranslation, writeMetadata } from "./pipeline/output-writer.js";
+import { writeTranscription, writeTranslation, writeWindowResults, writeMetadata } from "./pipeline/output-writer.js";
 import type { AudioTrack, GlossaryLang, UserMetadata, FinalMetadata } from "./util/types.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DOCS_DIR = path.resolve(__dirname, "../docs");
 
 // ── CLI argument parsing ─────────────────────────────────────────────────────
 
@@ -30,7 +27,8 @@ Usage:
 Required:
   --input <dir>            Local directory of audio files
   --output <dir>           Output directory (separate from input)
-  --model <path>           Fine-tuned translation GGUF model (required unless --server-url)
+  --model <path>           Fine-tuned translation GGUF model (required unless --hf-repo or --server-url)
+  --hf-repo <repo>         HuggingFace repo for translation model ("user/model[:quant]" or full HF URL)
 
 Metadata (optional, pick one):
   --dlsite <id|url>        DLSite work ID or URL — scrapes metadata for context
@@ -38,13 +36,15 @@ Metadata (optional, pick one):
 
 Metadata extraction (requires a general-purpose model, NOT the translation model):
   --meta-model <path>      GGUF model for metadata extraction (used with --dlsite)
+  --meta-hf-repo <repo>    HuggingFace repo for metadata model ("user/model[:quant]" or full HF URL)
   --meta-server-url <url>  External server URL for metadata extraction
+  --meta-ctx-size <number> Context size for metadata model (default: 16384)
 
 Translation server:
   --llama-server <path>    llama-server executable (default: in PATH)
   --server-url <url>       External llama-server URL for translation
   --port <number>          Translation server port (default: 8181)
-  --gpu-layers <number>    GPU layers (default: 99)
+  --gpu-layers <n|all|auto>  GPU layers to offload (default: all — forces every layer to GPU)
   --ctx-size <number>      Context size (default: 8192)
   --parallel <number>      Parallel inference slots (default: 1)
 
@@ -69,10 +69,13 @@ function parseCliArgs(): TranslatorConfig {
       input:             { type: "string" },
       output:            { type: "string" },
       model:             { type: "string" },
+      "hf-repo":         { type: "string" },
       dlsite:            { type: "string" },
       metadata:          { type: "string" },
       "meta-model":      { type: "string" },
+      "meta-hf-repo":    { type: "string" },
       "meta-server-url": { type: "string" },
+      "meta-ctx-size":   { type: "string" },
       "llama-server":    { type: "string" },
       "server-url":      { type: "string" },
       port:              { type: "string" },
@@ -96,8 +99,8 @@ function parseCliArgs(): TranslatorConfig {
 
   if (!values.input) { console.error("Error: --input is required"); printUsage(); process.exit(1); }
   if (!values.output) { console.error("Error: --output is required"); printUsage(); process.exit(1); }
-  if (!values.model && !values["server-url"]) {
-    console.error("Error: --model is required (unless --server-url is provided)");
+  if (!values.model && !values["hf-repo"] && !values["server-url"]) {
+    console.error("Error: --model or --hf-repo is required (unless --server-url is provided)");
     printUsage();
     process.exit(1);
   }
@@ -117,19 +120,30 @@ function parseCliArgs(): TranslatorConfig {
     console.error("Error: --asr must be 'python' or 'skip'"); process.exit(1);
   }
 
+  const gpuLayersRaw = values["gpu-layers"];
+  const gpuLayers: number | "auto" | "all" =
+    gpuLayersRaw === "all" || gpuLayersRaw === "auto"
+      ? gpuLayersRaw
+      : gpuLayersRaw
+        ? parseInt(gpuLayersRaw, 10)
+        : DEFAULT_CONFIG.gpuLayers;
+
   return {
     ...DEFAULT_CONFIG,
     inputDir: path.resolve(values.input),
     outputDir: path.resolve(values.output),
     modelPath: values.model ? path.resolve(values.model) : "",
+    hfRepo: values["hf-repo"] ? parseHfRepo(values["hf-repo"]) : undefined,
     dlsiteId: values.dlsite,
     metadataFile: values.metadata ? path.resolve(values.metadata) : undefined,
     metaModelPath: values["meta-model"] ? path.resolve(values["meta-model"]) : undefined,
+    metaHfRepo: values["meta-hf-repo"] ? parseHfRepo(values["meta-hf-repo"]) : undefined,
     metaServerUrl: values["meta-server-url"],
+    metaContextSize: values["meta-ctx-size"] ? parseInt(values["meta-ctx-size"], 10) : DEFAULT_CONFIG.metaContextSize,
     llamaServerExe: values["llama-server"] ?? DEFAULT_CONFIG.llamaServerExe,
     serverUrl: values["server-url"],
     serverPort: values.port ? parseInt(values.port, 10) : DEFAULT_CONFIG.serverPort,
-    gpuLayers: values["gpu-layers"] ? parseInt(values["gpu-layers"], 10) : DEFAULT_CONFIG.gpuLayers,
+    gpuLayers,
     contextSize: values["ctx-size"] ? parseInt(values["ctx-size"], 10) : DEFAULT_CONFIG.contextSize,
     parallel: values.parallel ? parseInt(values.parallel, 10) : DEFAULT_CONFIG.parallel,
     locale: lang ?? DEFAULT_CONFIG.locale,
@@ -138,6 +152,12 @@ function parseCliArgs(): TranslatorConfig {
     pythonExe: values["python-exe"] ?? DEFAULT_CONFIG.pythonExe,
     asrScript: values["asr-script"],
   };
+}
+
+/** Strip the HuggingFace base URL prefix if present, leaving just "user/model[:quant]". */
+function parseHfRepo(input: string): string {
+  const base = "https://huggingface.co/";
+  return input.startsWith(base) ? input.slice(base.length) : input;
 }
 
 // ── Audio discovery ──────────────────────────────────────────────────────────
@@ -203,7 +223,7 @@ async function main() {
     const dlsiteId = parseDlsiteId(config.dlsiteId);
     const dlsite = await fetchDlsiteMetadata(dlsiteId);
 
-    const hasMetaModel = config.metaModelPath || config.metaServerUrl;
+    const hasMetaModel = config.metaModelPath || config.metaServerUrl || config.metaHfRepo;
 
     if (dlsite.metadataMd && hasMetaModel) {
       // Full LLM extraction using a separate general-purpose model
@@ -213,16 +233,17 @@ async function main() {
       const metaServer = new LlamaServerManager({
         llamaServerExe: config.llamaServerExe,
         modelPath: config.metaModelPath ?? "",
+        hfRepo: config.metaHfRepo,
         serverPort: config.metaServerPort,
         gpuLayers: config.gpuLayers,
-        contextSize: config.contextSize,
+        contextSize: config.metaContextSize,
         parallel: 1,
         serverUrl: config.metaServerUrl,
       }, "MetaServer");
 
       try {
         await metaServer.start();
-        const metaClient = new LlmClient(metaServer.baseUrl, config);
+        const metaClient = new LlmClient(metaServer.baseUrl, { ...config, temperature: config.metaTemperature, repeatPenalty: 1.0 });
         const extractor = new MetadataExtractor(metaClient, config.locale);
         const result = await extractor.extract(fullMd);
         glossary = result.glossary;
@@ -320,6 +341,7 @@ async function main() {
   const server = new LlamaServerManager({
     llamaServerExe: config.llamaServerExe,
     modelPath: config.modelPath,
+    hfRepo: config.hfRepo,
     serverPort: config.serverPort,
     gpuLayers: config.gpuLayers,
     contextSize: config.contextSize,
@@ -330,8 +352,6 @@ async function main() {
   await server.start();
   const client = new LlmClient(server.baseUrl, config);
 
-  const grammarFile = config.mode === "echo" ? "translation-echo.gbnf" : "translation-base.gbnf";
-  const grammar = await fs.readFile(path.join(DOCS_DIR, grammarFile), "utf-8");
 
   // ── Step 5: Translate each track ────────────────────────────────────────
 
@@ -345,7 +365,9 @@ async function main() {
       const trackName = track.relativePath;
 
       try {
-        const entries = await translateTrack(segments, glossary, trackName, config, client, grammar);
+        const { entries, windowResults } = await translateTrack(segments, glossary, trackName, config, client);
+
+        await writeWindowResults(config.outputDir, track.relativeDir, track.stem, windowResults);
 
         if (entries.length === 0) {
           console.log(`  Skipped (translation produced no output)`);

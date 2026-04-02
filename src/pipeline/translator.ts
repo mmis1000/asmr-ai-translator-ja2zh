@@ -1,9 +1,7 @@
-import fs from "fs/promises";
-import path from "path";
 import type { TranslatorConfig } from "../config.js";
 import type { LlmClient } from "../server/llm-client.js";
 import { buildChatPrompt, extractJsonArray } from "../server/llm-client.js";
-import type { Segment, TranscriptSegment, GlossaryLang, TranslationEntry, TranslationEchoEntry } from "../util/types.js";
+import type { Segment, TranscriptSegment, GlossaryLang, TranslationEntry } from "../util/types.js";
 import {
   getPromptBuilder,
   formatTranscriptionJson,
@@ -11,8 +9,23 @@ import {
   buildGlossaryJson,
 } from "./prompt-builder.js";
 import { makeInferenceWindows } from "./windowing.js";
+import { generateTranslationGrammar } from "./grammar-generator.js";
 
 const MAX_RETRIES = 2;
+
+export interface WindowResult {
+  /** 1-based window index */
+  index: number;
+  segmentCount: number;
+  /** Number of attempts made (1 = succeeded first try) */
+  attempts: number;
+  /** Raw LLM output string (last successful attempt, or last failed attempt) */
+  rawLlm: string | null;
+  /** Parsed translation entries with global IDs restored; null if all attempts failed */
+  parsed: TranslationEntry[] | null;
+  /** Error message from last attempt if all failed */
+  error?: string | undefined;
+}
 
 /**
  * Convert cleaned ASR segments into the flat Segment[] format used by prompts.
@@ -29,7 +42,7 @@ export function asrToSegments(cleaned: TranscriptSegment[]): Segment[] {
 
 /**
  * Translate a single track's segments using windowed LLM inference.
- * Returns an array of translation entries with global (not window-local) IDs.
+ * Returns translation entries (global IDs) and per-window intermediates.
  */
 export async function translateTrack(
   segments: Segment[],
@@ -37,8 +50,7 @@ export async function translateTrack(
   trackName: string,
   config: TranslatorConfig,
   client: LlmClient,
-  grammar: string,
-): Promise<TranslationEntry[]> {
+): Promise<{ entries: TranslationEntry[]; windowResults: WindowResult[] }> {
   const promptBuilder = getPromptBuilder(config.locale, config.mode);
 
   const windows = makeInferenceWindows(segments, (segs) => {
@@ -49,12 +61,13 @@ export async function translateTrack(
 
   if (windows.length === 0) {
     console.log(`  [translate] No windows generated (too few segments)`);
-    return [];
+    return { entries: [], windowResults: [] };
   }
 
   console.log(`  [translate] ${windows.length} window(s) for "${trackName}"`);
 
   const allEntries: TranslationEntry[] = [];
+  const windowResults: WindowResult[] = [];
 
   for (let wi = 0; wi < windows.length; wi++) {
     const win = windows[wi]!;
@@ -64,31 +77,53 @@ export async function translateTrack(
     const transcriptionJson = formatTranscriptionJson(win.segments);
     const userPrompt = promptBuilder(trackName, glossary.summary, glossaryJson, transcriptionJson);
     const prompt = buildChatPrompt(userPrompt);
+    const grammar = generateTranslationGrammar(win.segments, config.mode);
 
     let parsed: TranslationEntry[] | null = null;
+    let lastRaw: string | null = null;
+    let lastError: string | undefined;
+    let attempts = 0;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      attempts = attempt + 1;
       try {
         const raw = await client.complete(prompt, { grammar });
+        lastRaw = raw;
         const jsonStr = extractJsonArray(raw);
         parsed = JSON.parse(jsonStr) as TranslationEntry[];
         break;
       } catch (err: any) {
-        console.error(`  [translate] Window ${wi + 1}/${windows.length} attempt ${attempt + 1} failed: ${err.message}`);
+        lastError = err.message;
+        console.error(`  [translate] Window ${wi + 1}/${windows.length} attempt ${attempts} failed: ${err.message}`);
         if (attempt === MAX_RETRIES) {
-          console.error(`  [translate] Giving up on window ${wi + 1} after ${MAX_RETRIES + 1} attempts`);
+          console.error(`  [translate] Giving up on window ${wi + 1} after ${attempts} attempts`);
         }
       }
     }
 
-    if (!parsed) continue;
+    const winResult: WindowResult = {
+      index: wi + 1,
+      segmentCount: win.segments.length,
+      attempts,
+      rawLlm: lastRaw,
+      parsed: null,
+      ...(parsed ? {} : { error: lastError }),
+    };
 
-    // Restore global IDs from window-local IDs
-    for (const entry of parsed) {
-      entry.ids = entry.ids.map(localId => win.idMap.get(localId) ?? localId);
-      allEntries.push(entry);
+    if (parsed) {
+      // Restore global IDs from window-local IDs
+      const globalParsed = parsed.map(entry => ({
+        ...entry,
+        ids: entry.ids.map(localId => win.idMap.get(localId) ?? localId),
+      }));
+      winResult.parsed = globalParsed;
+      for (const entry of globalParsed) {
+        allEntries.push(entry);
+      }
     }
+
+    windowResults.push(winResult);
   }
 
-  return allEntries;
+  return { entries: allEntries, windowResults };
 }

@@ -55,19 +55,23 @@ export function generateTranslationGrammar(
       const end = mergedSegs[mergedSegs.length - 1]!.end;
       const idsJson = "[" + ids.join(", ") + "]";
 
-      // Build the hardcoded prefix up to (but not including) the text value
-      let prefix: string;
+      // Build the hardcoded prefix up to (but not including) the text value.
+      // Echo mode: include the "input" field as a free text-value (not a
+      // hardcoded literal). Embedding the Japanese input text as a GBNF
+      // literal causes grammar parse failures in llama.cpp for long/complex
+      // Unicode strings; the echo model is trained to output the correct
+      // Echo mode
+      let entry: string;
       if (mode === "base") {
-        prefix = `{"ids": ${idsJson}, "text": `;
+        const prefix = `{"ids": ${idsJson}, "text": `;
+        const suffix = `, "start": ${start}, "end": ${end}}`;
+        entry = `(${makeGbnfStringLiteral(prefix)} text-value ${makeGbnfStringLiteral(suffix)})`;
       } else {
-        // Echo mode: hardcode the merged Japanese source text so the model
-        // is forced to echo exactly the right input before translating.
-        const inputText = mergedSegs.map((s) => s.text).join(" ");
-        prefix = `{"ids": ${idsJson}, "input": ${JSON.stringify(inputText)}, "text": `;
+        const inputText = mergedSegs.map((s) => s.text).join("");
+        const prefix = `{"ids": ${idsJson}, "input": ${JSON.stringify(inputText)}, "text": `;
+        const suffix = `, "start": ${start}, "end": ${end}}`;
+        entry = `(${makeGbnfStringLiteral(prefix)} text-value ${makeGbnfStringLiteral(suffix)})`;
       }
-      const suffix = `, "start": ${start}, "end": ${end}}`;
-
-      const entry = `(${makeGbnfStringLiteral(prefix)} text-value ${makeGbnfStringLiteral(suffix)})`;
 
       const hasNext = i + mergeLen < n;
       if (hasNext) {
@@ -77,7 +81,7 @@ export function generateTranslationGrammar(
       }
     }
 
-    gbnf += `s${stateNum} ::= ${alternatives.join("\n  | ")}\n\n`;
+    gbnf += `s${stateNum} ::= (\n  ${alternatives.join(" |\n  ")}\n)\n\n`;
   }
 
   return gbnf;

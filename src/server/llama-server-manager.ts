@@ -65,6 +65,7 @@ export class LlamaServerManager {
 
     return new Promise((resolve, reject) => {
       let isReady = false;
+      let startupTimer: NodeJS.Timeout;
 
       const checkReady = (data: Buffer) => {
         const text = data.toString();
@@ -78,6 +79,7 @@ export class LlamaServerManager {
         ) {
           if (!isReady) {
             isReady = true;
+            clearTimeout(startupTimer);
             this.process?.stdout?.off("data", checkReady);
             this.process?.stderr?.off("data", checkReady);
             this.process?.stderr?.on("data", (d: Buffer) => process.stderr.write(d));
@@ -91,13 +93,17 @@ export class LlamaServerManager {
       this.process!.stderr?.on("data", checkReady);
 
       this.process!.on("error", (err) => {
-        if (!isReady) reject(err);
+        if (!isReady) {
+          clearTimeout(startupTimer);
+          reject(err);
+        }
         this.process = null;
       });
 
       this.process!.on("exit", (code) => {
         this.process = null;
         if (!isReady) {
+          clearTimeout(startupTimer);
           reject(new Error(`${this.label} exited early with code ${code}`));
         } else if (!this.isStopping) {
           console.error(`\n[${this.label}] CRASH DETECTED! Exited with code ${code}. Auto-restarting...`);
@@ -112,7 +118,7 @@ export class LlamaServerManager {
       });
 
       const defaultTimeout = this.config.hfRepo ? 30 * 60 * 1000 : 5 * 60 * 1000;
-      setTimeout(() => {
+      startupTimer = setTimeout(() => {
         if (!isReady) {
           reject(new Error(`Timeout waiting for ${this.label} to be ready.`));
           this.stop();

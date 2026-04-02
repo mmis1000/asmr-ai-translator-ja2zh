@@ -1,6 +1,45 @@
 import type { TranscriptSegment, TranscriptFile } from "../util/types.js";
 
 /**
+ * Re-split a single ASR segment at internal word-level gaps >= threshold.
+ * Whisper often groups multiple utterances into one ~30s chunk when the audio
+ * has long silences mid-segment. Word timestamps let us recover the boundaries.
+ *
+ * Quality metrics (avg_logprob, compression_ratio, no_speech_prob) are
+ * inherited from the parent segment since we cannot recompute them.
+ */
+function resplitSegment(seg: TranscriptSegment, gapThresholdSec: number): TranscriptSegment[] {
+  const words = seg.words;
+  if (!words || words.length === 0) return [seg];
+
+  const groups: typeof words[] = [];
+  let current: typeof words = [words[0]!];
+
+  for (let i = 1; i < words.length; i++) {
+    const gap = words[i]!.start_time - words[i - 1]!.end_time;
+    if (gap >= gapThresholdSec) {
+      groups.push(current);
+      current = [words[i]!];
+    } else {
+      current.push(words[i]!);
+    }
+  }
+  groups.push(current);
+
+  if (groups.length === 1) return [seg];
+
+  return groups.map(grp => ({
+    text: grp.map(w => w.text).join(""),
+    start_time: grp[0]!.start_time,
+    end_time: grp[grp.length - 1]!.end_time,
+    words: grp,
+    avg_logprob: seg.avg_logprob,
+    compression_ratio: seg.compression_ratio,
+    no_speech_prob: seg.no_speech_prob,
+  }));
+}
+
+/**
  * Detect garbled/hallucinated ASR segments using Whisper quality metrics
  * and content heuristics. Ported from the parent project's transcript-match-pipeline.
  */
@@ -34,10 +73,17 @@ export function isGarbled(seg: TranscriptSegment): boolean {
   return false;
 }
 
-/** Filter garbled segments from a transcript, returning only clean ones. */
-export function cleanTranscript(transcript: TranscriptFile): TranscriptSegment[] {
-  if (transcript.segments && transcript.segments.length > 0) {
-    return transcript.segments.filter(s => !isGarbled(s));
-  }
-  return [];
+/**
+ * Filter garbled segments and re-split at internal gaps.
+ * Order: resplit first (exposes boundaries), then filter garbled sub-segments.
+ */
+export function cleanTranscript(
+  transcript: TranscriptFile,
+  resplitGapSec = 1.0,
+): TranscriptSegment[] {
+  if (!transcript.segments || transcript.segments.length === 0) return [];
+
+  return transcript.segments
+    .flatMap(s => resplitSegment(s, resplitGapSec))
+    .filter(s => !isGarbled(s));
 }

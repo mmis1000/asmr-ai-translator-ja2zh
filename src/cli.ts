@@ -219,70 +219,119 @@ async function main() {
   let glossary: GlossaryLang = { cvs: [], characters: [], terms: [], summary: "" };
   let outputMetadata: FinalMetadata | UserMetadata = {};
 
-  if (config.dlsiteId) {
-    const dlsiteId = parseDlsiteId(config.dlsiteId);
-    const dlsite = await fetchDlsiteMetadata(dlsiteId);
-
-    const hasMetaModel = config.metaModelPath || config.metaServerUrl || config.metaHfRepo;
-
-    if (dlsite.metadataMd && hasMetaModel) {
-      // Full LLM extraction using a separate general-purpose model
-      const fileList = tracks.map(t => `- ${t.relativePath}`).join("\n");
-      const fullMd = dlsite.metadataMd + `\n# File List\n\n${fileList}\n`;
-
-      const metaServer = new LlamaServerManager({
-        llamaServerExe: config.llamaServerExe,
-        modelPath: config.metaModelPath ?? "",
-        hfRepo: config.metaHfRepo,
-        serverPort: config.metaServerPort,
-        gpuLayers: config.gpuLayers,
-        contextSize: config.metaContextSize,
-        parallel: 1,
-        serverUrl: config.metaServerUrl,
-      }, "MetaServer");
-
-      try {
-        await metaServer.start();
-        const metaClient = new LlmClient(metaServer.baseUrl, { ...config, temperature: config.metaTemperature, repeatPenalty: 1.0 });
-        const extractor = new MetadataExtractor(metaClient, config.locale);
-        const result = await extractor.extract(fullMd);
-        glossary = result.glossary;
-        outputMetadata = result.metadata;
-      } finally {
-        await metaServer.stop();
+  /** Load an existing metadata.json from the output dir if present, returning true on success. */
+  async function tryLoadCachedMetadata(): Promise<boolean> {
+    const cachedPath = `${config.outputDir}/metadata.json`;
+    try {
+      const raw = await fs.readFile(cachedPath, "utf-8");
+      const parsed = JSON.parse(raw) as FinalMetadata | UserMetadata;
+      if ("translate" in parsed) {
+        // FinalMetadata
+        const m = parsed as FinalMetadata;
+        outputMetadata = m;
+        glossary = {
+          cvs: m.translate.cv_mapping,
+          characters: m.translate.character_mapping,
+          terms: m.translate.term_mapping,
+          summary: m.translate.summary,
+        };
+      } else {
+        // UserMetadata
+        const m = parsed as UserMetadata;
+        outputMetadata = m;
+        glossary = {
+          cvs: m.glossary?.cvs ?? [],
+          characters: m.glossary?.characters ?? [],
+          terms: m.glossary?.terms ?? [],
+          summary: m.summary ?? "",
+        };
       }
-    } else if (dlsite.metadataMd) {
-      // Scrape-only fallback: build basic metadata without LLM
-      console.log(`[Metadata] No --meta-model provided. Using scraped metadata only (no glossary extraction).`);
-      outputMetadata = {
-        title: dlsite.title,
-        summary: dlsite.description,
-        glossary: {
-          // Use VA names as basic CV entries (Japanese only, no translation)
-          cvs: dlsite.va
-            ? dlsite.va.split(/[,、／/]/).map(v => v.trim()).filter(Boolean).map(v => ({ ja: v, zh: v }))
-            : [],
+      console.log(`[Metadata] Loaded cached metadata from output dir`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  if (config.dlsiteId) {
+    if (await tryLoadCachedMetadata()) {
+      // Already extracted — skip re-running LLM
+    } else {
+      const dlsiteId = parseDlsiteId(config.dlsiteId);
+      const dlsite = await fetchDlsiteMetadata(dlsiteId);
+
+      const hasMetaModel = config.metaModelPath || config.metaServerUrl || config.metaHfRepo;
+
+      if (dlsite.metadataMd && hasMetaModel) {
+        // Full LLM extraction using a separate general-purpose model
+        const fileList = tracks.map(t => `- ${t.relativePath}`).join("\n");
+        const fullMd = dlsite.metadataMd + `\n# File List\n\n${fileList}\n`;
+
+        const metaServer = new LlamaServerManager({
+          llamaServerExe: config.llamaServerExe,
+          modelPath: config.metaModelPath ?? "",
+          hfRepo: config.metaHfRepo,
+          serverPort: config.metaServerPort,
+          gpuLayers: config.gpuLayers,
+          contextSize: config.metaContextSize,
+          parallel: 1,
+          serverUrl: config.metaServerUrl,
+        }, "MetaServer");
+
+        try {
+          await metaServer.start();
+          const metaClient = new LlmClient(metaServer.baseUrl, { ...config, temperature: config.metaTemperature, repeatPenalty: 1.0 });
+          const extractor = new MetadataExtractor(metaClient, config.locale);
+          const result = await extractor.extract(fullMd);
+          glossary = result.glossary;
+          outputMetadata = result.metadata;
+        } finally {
+          await metaServer.stop();
+        }
+      } else if (dlsite.metadataMd) {
+        // Scrape-only fallback: build basic metadata without LLM
+        console.log(`[Metadata] No --meta-model provided. Using scraped metadata only (no glossary extraction).`);
+        outputMetadata = {
+          title: dlsite.title,
+          summary: dlsite.description,
+          glossary: {
+            // Use VA names as basic CV entries (Japanese only, no translation)
+            cvs: dlsite.va
+              ? dlsite.va.split(/[,、／/]/).map(v => v.trim()).filter(Boolean).map(v => ({ ja: v, zh: v }))
+              : [],
+            characters: [],
+            terms: [],
+          },
+        } satisfies UserMetadata;
+        glossary = {
+          cvs: (outputMetadata as UserMetadata).glossary?.cvs ?? [],
           characters: [],
           terms: [],
-        },
-      } satisfies UserMetadata;
-      glossary = {
-        cvs: (outputMetadata as UserMetadata).glossary?.cvs ?? [],
-        characters: [],
-        terms: [],
-        summary: dlsite.description ?? "",
-      };
+          summary: dlsite.description ?? "",
+        };
+      }
     }
   } else if (config.metadataFile) {
     const raw = await fs.readFile(config.metadataFile, "utf-8");
-    const userMeta = JSON.parse(raw) as UserMetadata;
-    outputMetadata = userMeta;
-    glossary = {
-      cvs: userMeta.glossary?.cvs ?? [],
-      characters: userMeta.glossary?.characters ?? [],
-      terms: userMeta.glossary?.terms ?? [],
-      summary: userMeta.summary ?? "",
-    };
+    const parsed = JSON.parse(raw) as FinalMetadata | UserMetadata;
+    outputMetadata = parsed;
+    if ("translate" in parsed) {
+      const m = parsed as FinalMetadata;
+      glossary = {
+        cvs: m.translate.cv_mapping,
+        characters: m.translate.character_mapping,
+        terms: m.translate.term_mapping,
+        summary: m.translate.summary,
+      };
+    } else {
+      const m = parsed as UserMetadata;
+      glossary = {
+        cvs: m.glossary?.cvs ?? [],
+        characters: m.glossary?.characters ?? [],
+        terms: m.glossary?.terms ?? [],
+        summary: m.summary ?? "",
+      };
+    }
     console.log(`[Metadata] Loaded user-supplied metadata`);
   } else {
     console.log(`[Metadata] No metadata source — translating without glossary/context`);

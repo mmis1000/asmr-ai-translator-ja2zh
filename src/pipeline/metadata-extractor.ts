@@ -66,6 +66,8 @@ export class MetadataExtractor {
 
   // ── Phase 3: Glossary translation ────────────────────────────────────────
 
+  private pass3GrammarNoEn: string | null = null;
+
   async translateGlossary(
     jaData: Pass1Output,
   ): Promise<GlossaryTranslated> {
@@ -76,6 +78,9 @@ export class MetadataExtractor {
     }
     if (!this.pass3Grammar) {
       this.pass3Grammar = await fs.readFile(path.join(DOCS_DIR, "glossary-translation.gbnf"), "utf-8");
+    }
+    if (!this.pass3GrammarNoEn) {
+      this.pass3GrammarNoEn = await fs.readFile(path.join(DOCS_DIR, "glossary-translation-no-en.gbnf"), "utf-8");
     }
 
     const isTw = this.locale === "zh-tw";
@@ -88,32 +93,56 @@ export class MetadataExtractor {
       .replace(/\{\{EX_SAKURA\}\}/g, isTw ? "櫻" : "樱")
       .replace(/\{\{EX_JK_NOTE\}\}/g, isTw ? "清純系女高中生的表現" : "清纯系女高中生的表现");
 
-    const input = {
-      cv: jaData.ja.cv_list.map(({ name, note }) => note ? { ja: name, note } : { ja: name }),
-      characters: jaData.ja.character_list.map(({ name, note }) => note ? { ja: name, note } : { ja: name }),
-      circles: [{ ja: jaData.ja.circle }],
-      terms: jaData.ja.term_list.map(({ ja, note }) => note ? { ja, note } : { ja }),
+    type TermInput = { ja: string; note?: string };
+    const hasEnglish = (str: string) => /[A-Za-zａ-ｚＡ-Ｚ]/.test(str);
+
+    const inputPermissive = { cv: [] as TermInput[], characters: [] as TermInput[], circles: [] as TermInput[], terms: [] as TermInput[] };
+    const inputStrict = { cv: [] as TermInput[], characters: [] as TermInput[], circles: [] as TermInput[], terms: [] as TermInput[] };
+
+    const partition = (str: string, item: TermInput, destPermissive: TermInput[], destStrict: TermInput[]) => {
+      if (hasEnglish(str)) destPermissive.push(item);
+      else destStrict.push(item);
     };
 
-    const prompt = buildChatPromptWithSystem(sys, JSON.stringify(input, null, 2), true);
-    const raw = await this.client.complete(prompt, { grammar: this.pass3Grammar, temperature: 0.7, timeoutMs: 10 * 60 * 1000, seed: this.seed, label: "metadata-phase-3" });
+    jaData.ja.cv_list.forEach(({ name, note }) => partition(name, note ? { ja: name, note } : { ja: name }, inputPermissive.cv, inputStrict.cv));
+    jaData.ja.character_list.forEach(({ name, note }) => partition(name, note ? { ja: name, note } : { ja: name }, inputPermissive.characters, inputStrict.characters));
+    partition(jaData.ja.circle, { ja: jaData.ja.circle }, inputPermissive.circles, inputStrict.circles);
+    jaData.ja.term_list.forEach(({ ja, note }) => partition(ja, note ? { ja, note } : { ja }, inputPermissive.terms, inputStrict.terms));
+
+    const invokePhase3 = async (inputObj: typeof inputPermissive, grammar: string, label: string) => {
+      const hasAny = inputObj.cv.length || inputObj.characters.length || inputObj.circles.length || inputObj.terms.length;
+      if (!hasAny) return { cv: [], characters: [], circles: [], terms: [] };
+
+      const prompt = buildChatPromptWithSystem(sys, JSON.stringify(inputObj, null, 2), true);
+      const raw = await this.client.complete(prompt, { grammar, temperature: 0.7, timeoutMs: 10 * 60 * 1000, seed: this.seed, label });
+      return JSON.parse(extractJsonObject(raw)) as {
+        cv: { ja: string; zh: string; note?: string }[];
+        characters: { ja: string; zh: string; note?: string }[];
+        circles: { ja: string; zh: string; note?: string }[];
+        terms: { ja: string; zh: string; note?: string }[];
+      };
+    };
+
+    const [parsedStrict, parsedPermissive] = await Promise.all([
+      invokePhase3(inputStrict, this.pass3GrammarNoEn!, "metadata-phase-3-strict"),
+      invokePhase3(inputPermissive, this.pass3Grammar!, "metadata-phase-3-permissive")
+    ]);
 
     type GlossaryRow = { ja: string; zh: string; note?: string };
     const toEntry = (item: GlossaryRow): GlossaryTranslatedEntry =>
       item.note ? { zh: item.zh, note: item.note } : { zh: item.zh };
 
-    const parsed = JSON.parse(extractJsonObject(raw)) as {
-      cv: GlossaryRow[];
-      characters: GlossaryRow[];
-      circles: GlossaryRow[];
-      terms: GlossaryRow[];
+    const result: GlossaryTranslated = { cv: {}, characters: {}, circles: {}, terms: {} };
+    
+    const populate = (parsed: typeof parsedStrict) => {
+      for (const item of parsed.cv ?? []) if (item.ja && item.zh) result.cv[item.ja] = toEntry(item);
+      for (const item of parsed.characters ?? []) if (item.ja && item.zh) result.characters[item.ja] = toEntry(item);
+      for (const item of parsed.circles ?? []) if (item.ja && item.zh) result.circles[item.ja] = toEntry(item);
+      for (const item of parsed.terms ?? []) if (item.ja && item.zh) result.terms[item.ja] = toEntry(item);
     };
 
-    const result: GlossaryTranslated = { cv: {}, characters: {}, circles: {}, terms: {} };
-    for (const item of parsed.cv ?? []) if (item.ja && item.zh) result.cv[item.ja] = toEntry(item);
-    for (const item of parsed.characters ?? []) if (item.ja && item.zh) result.characters[item.ja] = toEntry(item);
-    for (const item of parsed.circles ?? []) if (item.ja && item.zh) result.circles[item.ja] = toEntry(item);
-    for (const item of parsed.terms ?? []) if (item.ja && item.zh) result.terms[item.ja] = toEntry(item);
+    populate(parsedStrict);
+    populate(parsedPermissive);
 
     return result;
   }

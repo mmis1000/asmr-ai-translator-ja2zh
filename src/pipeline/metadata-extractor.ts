@@ -3,6 +3,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import type { LlmClient } from "../server/llm-client.js";
 import { buildChatPromptWithSystem, extractJsonObject } from "../server/llm-client.js";
+import { MAX_ASR_PROMPT_LENGTH } from "../util/types.js";
 import type {
   Pass1Output,
   GlossaryTranslated,
@@ -37,6 +38,8 @@ export class MetadataExtractor {
   private pass3Grammar: string | null = null;
   private pass4System: string | null = null;
   private pass4Grammar: string | null = null;
+  private asrCleanupSystem: string | null = null;
+  private asrCleanupGrammar: string | null = null;
 
   constructor(
     private client: LlmClient,
@@ -62,6 +65,32 @@ export class MetadataExtractor {
     // Higher temperatures cause the model to think indefinitely, filling nPredict.
     const raw = await this.client.complete(prompt, { grammar: this.pass1Grammar, temperature: 0.6, nPredict: 14000, timeoutMs: 20 * 60 * 1000, seed: this.seed, label: "metadata-phase-1" });
     return JSON.parse(extractJsonObject(raw)) as Pass1Output;
+  }
+
+  // ── ASR prompt cleanup ───────────────────────────────────────────────────
+
+  async cleanAsrPrompt(asrPrompt: string, originalSummary: string): Promise<string> {
+    if (!this.asrCleanupSystem) {
+      const full = await fs.readFile(path.join(DOCS_DIR, "asr-cleanup-prompt-template.md"), "utf-8");
+      this.asrCleanupSystem = parseTemplate(full);
+    }
+    if (!this.asrCleanupGrammar) {
+      this.asrCleanupGrammar = await fs.readFile(path.join(DOCS_DIR, "asr-cleanup.gbnf"), "utf-8");
+    }
+
+    const user = `INPUT ASR PROMPT:\n${asrPrompt}\n\nRAW SUMMARY (for context):\n${originalSummary}`;
+    // ASR cleanup uses thinking to prioritize names and core scenarios.
+    const prompt = buildChatPromptWithSystem(this.asrCleanupSystem, user, false);
+    const raw = await this.client.complete(prompt, { grammar: this.asrCleanupGrammar, temperature: 0.6, seed: this.seed, label: "asr-cleanup" });
+    
+    const parsed = JSON.parse(extractJsonObject(raw)) as { cleaned_prompt: string };
+    let cleaned = parsed.cleaned_prompt.trim();
+
+    if (cleaned.length > MAX_ASR_PROMPT_LENGTH) {
+      console.warn(`  [Metadata] ASR prompt exceeded ${MAX_ASR_PROMPT_LENGTH} chars (${cleaned.length}), truncating...`);
+      cleaned = cleaned.slice(0, MAX_ASR_PROMPT_LENGTH);
+    }
+    return cleaned;
   }
 
   // ── Phase 3: Glossary translation ────────────────────────────────────────
@@ -236,6 +265,10 @@ export class MetadataExtractor {
     console.log("[Metadata] Phase 1: Extracting Japanese entities...");
     const jaData = await this.extractJapanese(metadataMd);
     console.log(`[Metadata] Extracted: title="${jaData.ja.title}", ${jaData.ja.cv_list.length} CVs, ${jaData.ja.term_list.length} terms`);
+
+    console.log("[Metadata] Phase 2: Cleaning ASR prompt...");
+    const cleanedPrompt = await this.cleanAsrPrompt(jaData.asr.prompt, jaData.ja.summary);
+    jaData.asr.prompt = cleanedPrompt;
 
     console.log("[Metadata] Phase 3: Translating glossary...");
     const glossary = await this.translateGlossary(jaData);

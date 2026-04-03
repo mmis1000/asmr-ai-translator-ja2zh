@@ -1,0 +1,15 @@
+# ASR Cleanup GBNF
+# Output: { "cleaned_prompt": "..." }
+
+thinking-char    ::= [^<] | "<" [^/] | "</" [^t] | "</t" [^h] | "</th" [^i] | "</thi" [^n] | "</thin" [^k] | "</think" [^>] | "\n"
+thinking-content ::= thinking-char*
+thinking-block   ::= "<think>" "\n"* thinking-content "</think>" "\n"*
+
+root ::= thinking-block? ws obj ws
+
+obj ::= "{" ws "\"cleaned_prompt\"" ws ":" ws prompt-string ws "}"
+
+# Blacklist: ○ ◯ 〇 ● ◎ ■ □ ▲ △ × * ※ ( ) 【 】 ♪ ★ ☆ ♡ ♥
+prompt-string ::= "\"" ([^"\\\x7F\x00-\x1F○◯〇●◎■□▲△×*※()【】♪★☆♡♥] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]))* "\""
+
+ws ::= [ \t\n\r]*

@@ -67,6 +67,9 @@ export interface UserMetadata {
   track_list?: { filename: string; title?: string }[];
 }
 
+/** Maximum character length for the ASR initial prompt. */
+export const MAX_ASR_PROMPT_LENGTH = 250;
+
 // ── Metadata extraction types (LLM Phase 1 output) ──────────────────────────
 
 export interface Pass1Output {

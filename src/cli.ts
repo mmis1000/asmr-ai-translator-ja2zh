@@ -52,6 +52,7 @@ Translation:
   --lang <zh-tw|zh-cn>     Target language (default: zh-tw)
   --mode <base|echo>       Translation mode (default: echo)
   --seed <number>          Fixed RNG seed for reproducible output (default: random)
+  --debug-log              Write LLM prompt and responses to debug_logs folder
 
 ASR:
   --asr <python|skip>      ASR mode (default: skip)
@@ -86,6 +87,7 @@ function parseCliArgs(): TranslatorConfig {
       lang:              { type: "string" },
       mode:              { type: "string" },
       seed:              { type: "string" },
+      "debug-log":       { type: "boolean" },
       asr:               { type: "string" },
       "python-exe":      { type: "string" },
       "asr-script":      { type: "string" },
@@ -151,6 +153,7 @@ function parseCliArgs(): TranslatorConfig {
     locale: lang ?? DEFAULT_CONFIG.locale,
     mode: mode ?? DEFAULT_CONFIG.mode,
     seed: values.seed !== undefined ? parseInt(values.seed, 10) : undefined,
+    debugLog: values["debug-log"] ?? DEFAULT_CONFIG.debugLog,
     asrMode: asrMode ?? DEFAULT_CONFIG.asrMode,
     pythonExe: values["python-exe"] ?? DEFAULT_CONFIG.pythonExe,
     asrScript: values["asr-script"],

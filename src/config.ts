@@ -41,6 +41,9 @@ export interface TranslatorConfig {
   outputDir: string;
   metadataFile?: string | undefined;
   dlsiteId?: string | undefined;
+
+  // Debug
+  debugLog: boolean;
 }
 
 export const DEFAULT_CONFIG: Omit<TranslatorConfig,
@@ -63,4 +66,5 @@ export const DEFAULT_CONFIG: Omit<TranslatorConfig,
   mode:           "echo",
   asrMode:        "skip",
   pythonExe:      "python",
+  debugLog:       false,
 };

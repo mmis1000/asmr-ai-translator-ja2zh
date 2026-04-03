@@ -105,6 +105,7 @@ async function runLLMCore(
   maxNPredict: number,
   temperature?: number | undefined,
   seed?: number | undefined,
+  label?: string | undefined,
 ): Promise<TranslationEntry[]> {
   const nPredict = Math.min(segments.length * N_PREDICT_PER_SEGMENT, maxNPredict);
   const filtered = filterGlossary(glossary, segments.map(s => s.text).join(""));
@@ -118,6 +119,7 @@ async function runLLMCore(
     nPredict,
     ...(temperature !== undefined ? { temperature } : {}),
     ...(seed !== undefined ? { seed } : {}),
+    ...(label !== undefined ? { label } : {}),
   });
   const jsonStr = extractJsonArray(raw);
   const parsed = JSON.parse(jsonStr) as TranslationEntry[];
@@ -176,7 +178,7 @@ export async function translateTrack(
           // ── Attempt 1: standard run (seed for reproducibility if configured)
           const localParsed = await runLLMCore(
             win.segments, trackName, glossary, promptBuilder, grammar, client,
-            maxNPredict, undefined, config.seed,
+            maxNPredict, undefined, config.seed, `translation-${trackName}-window${wi + 1}-attempt1`
           );
           parsed = localParsed.map(entry => ({
             ...entry,
@@ -189,7 +191,7 @@ export async function translateTrack(
           console.warn(`  [translate] Window ${wi + 1} retry with temperature ${bumpedTemp.toFixed(2)}`);
           const localParsed = await runLLMCore(
             win.segments, trackName, glossary, promptBuilder, grammar, client,
-            maxNPredict, bumpedTemp, config.seed,
+            maxNPredict, bumpedTemp, config.seed, `translation-${trackName}-window${wi + 1}-attempt2`
           );
           parsed = localParsed.map(entry => ({
             ...entry,
@@ -208,8 +210,8 @@ export async function translateTrack(
           const chunkBGrammar = generateTranslationGrammar(chunkB, config.mode);
 
           const [resultA, resultB] = await Promise.all([
-            runLLMCore(chunkA, trackName, glossary, promptBuilder, chunkAGrammar, client, maxNPredict, undefined, config.seed),
-            runLLMCore(chunkB, trackName, glossary, promptBuilder, chunkBGrammar, client, maxNPredict, undefined, config.seed),
+            runLLMCore(chunkA, trackName, glossary, promptBuilder, chunkAGrammar, client, maxNPredict, undefined, config.seed, `translation-${trackName}-window${wi + 1}-attempt3-sub1`),
+            runLLMCore(chunkB, trackName, glossary, promptBuilder, chunkBGrammar, client, maxNPredict, undefined, config.seed, `translation-${trackName}-window${wi + 1}-attempt3-sub2`),
           ]);
 
           const restoreIds = (entries: TranslationEntry[]) =>
@@ -234,7 +236,7 @@ export async function translateTrack(
             const microGrammar = generateTranslationGrammar(micro, config.mode);
             try {
               const microResult = await runLLMCore(
-                micro, trackName, glossary, promptBuilder, microGrammar, client, maxNPredict, undefined, config.seed,
+                micro, trackName, glossary, promptBuilder, microGrammar, client, maxNPredict, undefined, config.seed, `translation-${trackName}-window${wi + 1}-attempt4-sub${Math.floor(mi / MICRO_SIZE) + 1}`
               );
               for (const entry of microResult) {
                 collected.push({

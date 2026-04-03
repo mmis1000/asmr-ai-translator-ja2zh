@@ -1,3 +1,5 @@
+import fs from "fs/promises";
+import path from "path";
 import type { TranslatorConfig } from "../config.js";
 
 const IM_S = "<|im_start|>";
@@ -44,7 +46,7 @@ export function extractJsonArray(raw: string): string {
 export class LlmClient {
   constructor(
     private baseUrl: string,
-    private config: Pick<TranslatorConfig, "temperature" | "topP" | "topK" | "minP" | "repeatPenalty">,
+    private config: Pick<TranslatorConfig, "temperature" | "topP" | "topK" | "minP" | "repeatPenalty" | "debugLog" | "outputDir">,
   ) {}
 
   /** Check if the server is responsive. */
@@ -72,6 +74,7 @@ export class LlmClient {
       timeoutMs?: number | undefined;
       /** Fixed RNG seed for reproducible outputs. Omit for random (default). */
       seed?: number | undefined;
+      label?: string | undefined;
     },
   ): Promise<string> {
     const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -92,6 +95,7 @@ export class LlmClient {
       temperature?: number | undefined;
       nPredict?: number | undefined;
       seed?: number | undefined;
+      label?: string | undefined;
     } | undefined,
     signal: AbortSignal,
   ): Promise<string> {
@@ -164,6 +168,25 @@ export class LlmClient {
 
     if (!rawContent) {
       throw new Error("LLM returned empty response");
+    }
+
+    if (this.config.debugLog && this.config.outputDir) {
+      try {
+        const debugDir = path.join(this.config.outputDir, "debug_logs");
+        await fs.mkdir(debugDir, { recursive: true });
+        const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const rng = Math.random().toString(36).substring(2, 8);
+        const prefix = options?.label ? `${options.label}_` : "";
+        const filename = `llm_log_${prefix}${timestamp}_${rng}.md`;
+        // ensure path component correctness if label has strange chars but trackName might have slashes?
+        // Actually trackName could contain slashes like "dir/file.mp3". We should sanitize it.
+        const safeFilename = filename.replace(/[\/\\]/g, "-");
+        
+        const debugContent = `# PROMPT\n\n\`\`\`\n${prompt}\n\`\`\`\n\n# RESPONSE\n\n\`\`\`\n${rawContent}\n\`\`\`\n`;
+        await fs.writeFile(path.join(debugDir, safeFilename), debugContent, "utf-8");
+      } catch (e) {
+        console.error("Failed to write debug log:", e);
+      }
     }
 
     return rawContent;

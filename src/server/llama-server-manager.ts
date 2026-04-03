@@ -51,7 +51,7 @@ export class LlamaServerManager {
       "--parallel", String(this.config.parallel),
       "--kv-unified",
       "--keep", "-1",
-      "-fa", "on",
+      // "-fa", "on",
       "--no-context-shift",  // Qwen3.5 hybrid SSM architecture crashes with --context-shift (seq_add assertion)
       // Do not use kv quantization for the fintuend Qwen3.5 translation model, 
       // it will cause severe attention collapse on long input

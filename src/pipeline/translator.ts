@@ -19,7 +19,7 @@ const COLLAPSE_MIN_LEN = 5;
 const COLLAPSE_THRESHOLD = 3;
 
 /** Bump temperature by this amount on the first retry. */
-const TEMPERATURE_BUMP = 0.4;
+const TEMPERATURE_BUMP = 0.5;
 
 /** Tokens budgeted per segment for output generation. */
 const N_PREDICT_PER_SEGMENT = 400;
@@ -189,7 +189,7 @@ export async function translateTrack(
           console.warn(`  [translate] Window ${wi + 1} retry with temperature ${bumpedTemp.toFixed(2)}`);
           const localParsed = await runLLMCore(
             win.segments, trackName, glossary, promptBuilder, grammar, client,
-            maxNPredict, bumpedTemp,
+            maxNPredict, bumpedTemp, config.seed,
           );
           parsed = localParsed.map(entry => ({
             ...entry,
@@ -208,8 +208,8 @@ export async function translateTrack(
           const chunkBGrammar = generateTranslationGrammar(chunkB, config.mode);
 
           const [resultA, resultB] = await Promise.all([
-            runLLMCore(chunkA, trackName, glossary, promptBuilder, chunkAGrammar, client, maxNPredict),
-            runLLMCore(chunkB, trackName, glossary, promptBuilder, chunkBGrammar, client, maxNPredict),
+            runLLMCore(chunkA, trackName, glossary, promptBuilder, chunkAGrammar, client, maxNPredict, undefined, config.seed),
+            runLLMCore(chunkB, trackName, glossary, promptBuilder, chunkBGrammar, client, maxNPredict, undefined, config.seed),
           ]);
 
           const restoreIds = (entries: TranslationEntry[]) =>
@@ -234,7 +234,7 @@ export async function translateTrack(
             const microGrammar = generateTranslationGrammar(micro, config.mode);
             try {
               const microResult = await runLLMCore(
-                micro, trackName, glossary, promptBuilder, microGrammar, client, maxNPredict,
+                micro, trackName, glossary, promptBuilder, microGrammar, client, maxNPredict, undefined, config.seed,
               );
               for (const entry of microResult) {
                 collected.push({

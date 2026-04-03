@@ -53,7 +53,7 @@ export const DEFAULT_CONFIG: Omit<TranslatorConfig,
   parallel:       1,
   metaServerPort:    8182,
   metaContextSize:   16384,
-  temperature:    0.2,   // fine-tuned translation model — low, deterministic
+  temperature:    0.1,   // fine-tuned translation model — low, deterministic
   repeatPenalty:  1.1,   // penalize repetition to prevent attention collapse loops
   metaTemperature: 0.7,  // general-purpose model (Qwen3 non-thinking default)
   topP:           0.95,

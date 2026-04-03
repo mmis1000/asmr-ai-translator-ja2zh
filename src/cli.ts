@@ -284,7 +284,7 @@ async function main() {
         try {
           await metaServer.start();
           const metaClient = new LlmClient(metaServer.baseUrl, { ...config, temperature: config.metaTemperature, repeatPenalty: 1.0 });
-          const extractor = new MetadataExtractor(metaClient, config.locale);
+          const extractor = new MetadataExtractor(metaClient, config.locale, config.seed);
           const result = await extractor.extract(fullMd);
           glossary = result.glossary;
           outputMetadata = result.metadata;

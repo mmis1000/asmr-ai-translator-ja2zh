@@ -17,7 +17,18 @@ function resplitSegment(seg: TranscriptSegment, gapThresholdSec: number): Transc
 
   for (let i = 1; i < words.length; i++) {
     const gap = words[i]!.start_time - words[i - 1]!.end_time;
-    if (gap >= gapThresholdSec) {
+    
+    // Also treat long "…" (silent placeholders) as explicit gaps.
+    // We break *after* the "…" token so it trails the previous sentence.
+    const prevWord = words[i - 1]!;
+    
+    // Match tokens that consist ONLY of spaces, ..., and basic punctuation
+    const isSilenceToken = /^[\s…・。、！？!?]+$/.test(prevWord.text) && prevWord.text.includes("…");
+    const prevIsLongSilence =
+      isSilenceToken &&
+      prevWord.end_time - prevWord.start_time >= gapThresholdSec;
+
+    if (gap >= gapThresholdSec || prevIsLongSilence) {
       groups.push(current);
       current = [words[i]!];
     } else {

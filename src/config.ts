@@ -22,6 +22,8 @@ export interface TranslatorConfig {
   topK: number;
   minP: number;
   repeatPenalty: number;
+  /** Fixed RNG seed for reproducible outputs; omit (undefined) for random. */
+  seed?: number | undefined;
   // Sampling — metadata extraction model (general-purpose / thinking, higher temperature)
   metaTemperature: number;
 

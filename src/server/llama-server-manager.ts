@@ -53,8 +53,8 @@ export class LlamaServerManager {
       "--keep", "-1",
       "-fa", "on",
       "--no-context-shift",  // Qwen3.5 hybrid SSM architecture crashes with --context-shift (seq_add assertion)
-      "--cache-type-k", "q8_0",
-      "--cache-type-v", "q8_0",
+      // "--cache-type-k", "q8_0",
+      // "--cache-type-v", "q8_0",
     ];
 
     console.log(`[${this.label}] Starting ${this.config.llamaServerExe} on port ${this.config.serverPort}...`);

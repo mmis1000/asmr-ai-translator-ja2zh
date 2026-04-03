@@ -51,6 +51,7 @@ Translation server:
 Translation:
   --lang <zh-tw|zh-cn>     Target language (default: zh-tw)
   --mode <base|echo>       Translation mode (default: echo)
+  --seed <number>          Fixed RNG seed for reproducible output (default: random)
 
 ASR:
   --asr <python|skip>      ASR mode (default: skip)
@@ -84,6 +85,7 @@ function parseCliArgs(): TranslatorConfig {
       parallel:          { type: "string" },
       lang:              { type: "string" },
       mode:              { type: "string" },
+      seed:              { type: "string" },
       asr:               { type: "string" },
       "python-exe":      { type: "string" },
       "asr-script":      { type: "string" },
@@ -148,6 +150,7 @@ function parseCliArgs(): TranslatorConfig {
     parallel: values.parallel ? parseInt(values.parallel, 10) : DEFAULT_CONFIG.parallel,
     locale: lang ?? DEFAULT_CONFIG.locale,
     mode: mode ?? DEFAULT_CONFIG.mode,
+    seed: values.seed !== undefined ? parseInt(values.seed, 10) : undefined,
     asrMode: asrMode ?? DEFAULT_CONFIG.asrMode,
     pythonExe: values["python-exe"] ?? DEFAULT_CONFIG.pythonExe,
     asrScript: values["asr-script"],

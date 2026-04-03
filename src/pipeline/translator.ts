@@ -11,7 +11,18 @@ import {
 import { makeInferenceWindows } from "./windowing.js";
 import { generateTranslationGrammar } from "./grammar-generator.js";
 
-const MAX_RETRIES = 2;
+const MAX_RETRIES = 3;
+
+/** Minimum text length to be considered a repeated collapse pattern. */
+const COLLAPSE_MIN_LEN = 5;
+/** Number of consecutive entries with identical text before declaring collapse. */
+const COLLAPSE_THRESHOLD = 3;
+
+/** Bump temperature by this amount on the first retry. */
+const TEMPERATURE_BUMP = 0.4;
+
+/** Tokens budgeted per segment for output generation. */
+const N_PREDICT_PER_SEGMENT = 400;
 
 export interface WindowResult {
   /** 1-based window index */
@@ -41,6 +52,80 @@ export function asrToSegments(cleaned: TranscriptSegment[]): Segment[] {
 }
 
 /**
+ * Detect attention collapse: when the LLM hallucinates by outputting the same
+ * text for many distinct source inputs, whether consecutive or interleaved.
+ *
+ * Builds a map of outputText → Set<inputText>. If any output text (longer than
+ * `COLLAPSE_MIN_LEN`) is generated for `COLLAPSE_THRESHOLD` or more distinct
+ * inputs, it is considered a collapse.
+ *
+ * Legitimate repeated translations (same input → same output, e.g. refrain
+ * lines) are excluded by only counting *distinct* inputs per output.
+ */
+export function detectAttentionCollapse(entries: TranslationEntry[], segments: Segment[]): void {
+  // Build id → source text map for fast lookup
+  const inputByLocalId = new Map<number, string>();
+  for (const seg of segments) inputByLocalId.set(seg.id, seg.text);
+
+  // outputText → set of distinct source inputs that produced it
+  const distinctInputsPerOutput = new Map<string, Set<string>>();
+
+  for (const entry of entries) {
+    const outputText = entry.text;
+    if (outputText === null || outputText.length <= COLLAPSE_MIN_LEN) continue;
+
+    const inputText = inputByLocalId.get(entry.ids[0]!) ?? "";
+
+    let inputSet = distinctInputsPerOutput.get(outputText);
+    if (inputSet === undefined) {
+      inputSet = new Set<string>();
+      distinctInputsPerOutput.set(outputText, inputSet);
+    }
+    inputSet.add(inputText);
+
+    if (inputSet.size >= COLLAPSE_THRESHOLD) {
+      throw new Error(
+        `Attention collapse detected: "${outputText.slice(0, 40)}…" produced for ${inputSet.size} distinct inputs`,
+      );
+    }
+  }
+}
+
+/**
+ * Build the prompt, call the LLM, parse JSON, and run collapse detection.
+ * Returns parsed entries with **window-local** IDs (callers restore global IDs).
+ */
+async function runLLMCore(
+  segments: Segment[],
+  trackName: string,
+  glossary: GlossaryLang,
+  promptBuilder: ReturnType<typeof getPromptBuilder>,
+  grammar: string,
+  client: LlmClient,
+  maxNPredict: number,
+  temperature?: number | undefined,
+  seed?: number | undefined,
+): Promise<TranslationEntry[]> {
+  const nPredict = Math.min(segments.length * N_PREDICT_PER_SEGMENT, maxNPredict);
+  const filtered = filterGlossary(glossary, segments.map(s => s.text).join(""));
+  const glossaryJson = buildGlossaryJson(filtered);
+  const transcriptionJson = formatTranscriptionJson(segments);
+  const userPrompt = promptBuilder(trackName, glossary.summary, glossaryJson, transcriptionJson);
+  const prompt = buildChatPrompt(userPrompt);
+
+  const raw = await client.complete(prompt, {
+    grammar,
+    nPredict,
+    ...(temperature !== undefined ? { temperature } : {}),
+    ...(seed !== undefined ? { seed } : {}),
+  });
+  const jsonStr = extractJsonArray(raw);
+  const parsed = JSON.parse(jsonStr) as TranslationEntry[];
+  detectAttentionCollapse(parsed, segments);
+  return parsed;
+}
+
+/**
  * Translate a single track's segments using windowed LLM inference.
  * Returns translation entries (global IDs) and per-window intermediates.
  */
@@ -52,6 +137,12 @@ export async function translateTrack(
   client: LlmClient,
 ): Promise<{ entries: TranslationEntry[]; windowResults: WindowResult[] }> {
   const promptBuilder = getPromptBuilder(config.locale, config.mode);
+  // Reserve a fixed overhead for the prompt (system text + transcription JSON ≈ 2048 tokens).
+  // The remainder is available for output. In echo mode the output echoes the source input back,
+  // so output tokens can be significantly larger than in base mode — we want the full remainder,
+  // not just half the context.
+  const PROMPT_OVERHEAD_TOKENS = 2048;
+  const maxNPredict = Math.max(config.contextSize - PROMPT_OVERHEAD_TOKENS, 512);
 
   const windows = makeInferenceWindows(segments, (segs) => {
     const jaText = segs.map(s => s.text).join("");
@@ -71,12 +162,6 @@ export async function translateTrack(
 
   for (let wi = 0; wi < windows.length; wi++) {
     const win = windows[wi]!;
-    const windowJaText = win.segments.map(s => s.text).join("");
-    const filtered = filterGlossary(glossary, windowJaText);
-    const glossaryJson = buildGlossaryJson(filtered);
-    const transcriptionJson = formatTranscriptionJson(win.segments);
-    const userPrompt = promptBuilder(trackName, glossary.summary, glossaryJson, transcriptionJson);
-    const prompt = buildChatPrompt(userPrompt);
     const grammar = generateTranslationGrammar(win.segments, config.mode);
 
     let parsed: TranslationEntry[] | null = null;
@@ -87,14 +172,110 @@ export async function translateTrack(
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       attempts = attempt + 1;
       try {
-        const raw = await client.complete(prompt, { grammar });
-        lastRaw = raw;
-        const jsonStr = extractJsonArray(raw);
-        parsed = JSON.parse(jsonStr) as TranslationEntry[];
-        break;
-      } catch (err: any) {
-        lastError = err.message;
-        console.error(`  [translate] Window ${wi + 1}/${windows.length} attempt ${attempts} failed: ${err.message}`);
+        if (attempt === 0) {
+          // ── Attempt 1: standard run (seed for reproducibility if configured)
+          const localParsed = await runLLMCore(
+            win.segments, trackName, glossary, promptBuilder, grammar, client,
+            maxNPredict, undefined, config.seed,
+          );
+          parsed = localParsed.map(entry => ({
+            ...entry,
+            ids: entry.ids.map(localId => win.idMap.get(localId) ?? localId),
+          }));
+
+        } else if (attempt === 1) {
+          // ── Attempt 2: temperature bump fallback ──────────────────────────
+          const bumpedTemp = (config.temperature ?? 0.3) + TEMPERATURE_BUMP;
+          console.warn(`  [translate] Window ${wi + 1} retry with temperature ${bumpedTemp.toFixed(2)}`);
+          const localParsed = await runLLMCore(
+            win.segments, trackName, glossary, promptBuilder, grammar, client,
+            maxNPredict, bumpedTemp,
+          );
+          parsed = localParsed.map(entry => ({
+            ...entry,
+            ids: entry.ids.map(localId => win.idMap.get(localId) ?? localId),
+          }));
+
+        } else if (attempt === 2) {
+          // ── Attempt 3: sub-chunking fallback ──────────────────
+          console.warn(`  [translate] Window ${wi + 1} retry with sub-chunking`);
+          const rawSegs = win.segments;
+          const mid = Math.ceil(rawSegs.length / 2);
+          const chunkA = rawSegs.slice(0, mid);
+          const chunkB = rawSegs.slice(mid);
+
+          const chunkAGrammar = generateTranslationGrammar(chunkA, config.mode);
+          const chunkBGrammar = generateTranslationGrammar(chunkB, config.mode);
+
+          const [resultA, resultB] = await Promise.all([
+            runLLMCore(chunkA, trackName, glossary, promptBuilder, chunkAGrammar, client, maxNPredict),
+            runLLMCore(chunkB, trackName, glossary, promptBuilder, chunkBGrammar, client, maxNPredict),
+          ]);
+
+          const restoreIds = (entries: TranslationEntry[]) =>
+            entries.map(entry => ({
+              ...entry,
+              ids: entry.ids.map(localId => win.idMap.get(localId) ?? localId),
+            }));
+
+          parsed = [...restoreIds(resultA), ...restoreIds(resultB)];
+
+        } else {
+          // ── Attempt 4: micro-chunking (1–2 segments at a time) ────────
+          // Best-effort: translate each micro-chunk individually and collect
+          // whatever succeeds. Segments that still fail are omitted.
+          console.warn(`  [translate] Window ${wi + 1} retry with micro-chunking (1-2 segments)`);
+          const MICRO_SIZE = 2;
+          const collected: TranslationEntry[] = [];
+          let microFailed = 0;
+
+          for (let mi = 0; mi < win.segments.length; mi += MICRO_SIZE) {
+            const micro = win.segments.slice(mi, mi + MICRO_SIZE);
+            const microGrammar = generateTranslationGrammar(micro, config.mode);
+            try {
+              const microResult = await runLLMCore(
+                micro, trackName, glossary, promptBuilder, microGrammar, client, maxNPredict,
+              );
+              for (const entry of microResult) {
+                collected.push({
+                  ...entry,
+                  ids: entry.ids.map(localId => win.idMap.get(localId) ?? localId),
+                });
+              }
+            } catch (microErr: unknown) {
+              microFailed++;
+              const microMsg = microErr instanceof Error ? microErr.message : String(microErr);
+              console.warn(`  [translate] Micro-chunk [${mi + 1}–${mi + micro.length}] failed, falling back to original text: ${microMsg}`);
+              
+              for (const m of micro) {
+                const entry = {
+                  ids: [win.idMap.get(m.id) ?? m.id],
+                  text: m.text,
+                  start: m.start,
+                  end: m.end,
+                } as TranslationEntry & { input?: string };
+                
+                if (config.mode === "echo") {
+                  entry.input = m.text;
+                }
+                collected.push(entry);
+              }
+            }
+          }
+
+          if (microFailed > 0) {
+            console.warn(`  [translate] Micro-chunking: ${microFailed} chunk(s) defaulted to original text in window ${wi + 1}`);
+          }
+          // Even if some micro-chunks failed, treat this attempt as successful
+          // with whatever we collected (may be empty if everything failed).
+          parsed = collected;
+        }
+
+        break; // success — exit retry loop
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        lastError = msg;
+        console.error(`  [translate] Window ${wi + 1}/${windows.length} attempt ${attempts} failed: ${msg}`);
         if (attempt === MAX_RETRIES) {
           console.error(`  [translate] Giving up on window ${wi + 1} after ${attempts} attempts`);
         }
@@ -111,13 +292,8 @@ export async function translateTrack(
     };
 
     if (parsed) {
-      // Restore global IDs from window-local IDs
-      const globalParsed = parsed.map(entry => ({
-        ...entry,
-        ids: entry.ids.map(localId => win.idMap.get(localId) ?? localId),
-      }));
-      winResult.parsed = globalParsed;
-      for (const entry of globalParsed) {
+      winResult.parsed = parsed;
+      for (const entry of parsed) {
         allEntries.push(entry);
       }
     }

@@ -70,6 +70,8 @@ export class LlmClient {
       temperature?: number | undefined;
       nPredict?: number | undefined;
       timeoutMs?: number | undefined;
+      /** Fixed RNG seed for reproducible outputs. Omit for random (default). */
+      seed?: number | undefined;
     },
   ): Promise<string> {
     const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -89,6 +91,7 @@ export class LlmClient {
       grammar?: string | undefined;
       temperature?: number | undefined;
       nPredict?: number | undefined;
+      seed?: number | undefined;
     } | undefined,
     signal: AbortSignal,
   ): Promise<string> {
@@ -103,6 +106,7 @@ export class LlmClient {
       repeat_penalty: this.config.repeatPenalty,
       n_predict: options?.nPredict ?? 8192,
       stop: STOP,
+      ...(options?.seed !== undefined ? { seed: options.seed } : {}),
     };
 
     let res: Response;

@@ -16,6 +16,15 @@ from engine import ASREngine
 ASR_DONE_SENTINEL = "[ASR_DONE]"
 
 
+def global_exception_handler(exc_type, exc_value, exc_traceback):
+    import traceback
+    print("FATAL PYTHON ERROR:", file=sys.stderr)
+    traceback.print_exception(exc_type, exc_value, exc_traceback, file=sys.stderr)
+    sys.exit(1)
+
+sys.excepthook = global_exception_handler
+
+
 def main():
     parser = argparse.ArgumentParser(description="CTranslate2/Whisper ASR CLI for asmr-one-dump")
     parser.add_argument("--audio", required=True, help="Path to audio file")
@@ -23,6 +32,11 @@ def main():
     parser.add_argument("--output", required=True, help="Path to save JSON output")
     parser.add_argument("--device", default="cuda", help="Device: cuda or cpu")
     parser.add_argument("--model", default="large-v3-turbo", help="Whisper model size")
+    parser.add_argument("--start", type=float, help="Clip start time in seconds")
+    parser.add_argument("--end", type=float, help="Clip end time in seconds")
+    parser.add_argument("--temperature", type=float, default=0, help="Whisper temperature")
+    parser.add_argument("--beam-size", type=int, default=5, help="Beam size")
+    parser.add_argument("--no-condition", action="store_true", help="Disable condition_on_previous_text")
 
     args = parser.parse_args()
 
@@ -31,7 +45,15 @@ def main():
         sys.exit(1)
 
     engine = ASREngine(model_size=args.model, device=args.device)
-    full_text, sentences, segments = engine.transcribe_file(args.audio, prompt=args.prompt)
+    full_text, sentences, segments = engine.transcribe_file(
+        args.audio,
+        prompt=args.prompt,
+        clip_start=args.start,
+        clip_end=args.end,
+        temperature=args.temperature,
+        beam_size=args.beam_size,
+        condition_on_previous_text=not args.no_condition
+    )
 
     output_data = {
         "full_text": full_text,

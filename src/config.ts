@@ -1,3 +1,10 @@
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const pythonSubPath = process.platform === "win32" ? ".venv/Scripts/python.exe" : ".venv/bin/python";
+const DEFAULT_ASR_PYTHON = path.resolve(__dirname, "../asr", pythonSubPath);
+
 export interface TranslatorConfig {
   // llama-server (translation model — fine-tuned)
   llamaServerExe: string;
@@ -35,6 +42,19 @@ export interface TranslatorConfig {
   asrMode: "python" | "skip";
   pythonExe: string;
   asrScript?: string | undefined;
+  demucsScript?: string | undefined;
+
+  // Demucs Filtering
+  vocalEnergyThreshold: number;
+  vocalSilenceThreshold: number;
+  snrThreshold: number;
+  minHallucinationLength: number;
+  rejectNegativeSnr: boolean;
+  resplitGapSec: number;
+  maxRepetitions: number;
+  repairTemperature: number;
+  repairBeamSize: number;
+  saveAudioStems: boolean;
 
   // Paths
   inputDir: string;
@@ -65,6 +85,16 @@ export const DEFAULT_CONFIG: Omit<TranslatorConfig,
   locale:         "zh-tw",
   mode:           "echo",
   asrMode:        "skip",
-  pythonExe:      "python",
+  pythonExe:      DEFAULT_ASR_PYTHON,
+  vocalEnergyThreshold: 0.001,
+  vocalSilenceThreshold: 0.00005,
+  snrThreshold:   2.0,
+  minHallucinationLength: 20,
+  rejectNegativeSnr: true,
+  resplitGapSec: 1.0,
+  maxRepetitions: 3,
+  repairTemperature: 0.6,
+  repairBeamSize: 10,
+  saveAudioStems: false,
   debugLog:       false,
 };

@@ -7,11 +7,21 @@ import { type TranslatorConfig, DEFAULT_CONFIG } from "./config.js";
 import { LlamaServerManager } from "./server/llama-server-manager.js";
 import { LlmClient } from "./server/llm-client.js";
 import { cleanTranscript } from "./pipeline/transcript-cleaner.js";
-import { asrToSegments, translateTrack } from "./pipeline/translator.js";
 import { getTranscription } from "./pipeline/asr-runner.js";
 import { fetchDlsiteMetadata, parseDlsiteId } from "./pipeline/fetch-metadata.js";
 import { MetadataExtractor } from "./pipeline/metadata-extractor.js";
-import { writeTranscription, writeTranslation, writeWindowResults, writeMetadata } from "./pipeline/output-writer.js";
+import {  repairTranscription,
+  applySurgicalRepair,
+} from "./pipeline/asr-repairer.js";
+import { 
+  writeTranscription, 
+  writeTranslation, 
+  writeMetadata, 
+  writeWindowResults, 
+  writeSurgicalLog, 
+  readSurgicalLog,
+} from "./pipeline/output-writer.js";
+import { asrToSegments, translateTrack } from "./pipeline/translator.js";
 import type { AudioTrack, GlossaryLang, UserMetadata, FinalMetadata } from "./util/types.js";
 
 
@@ -56,8 +66,13 @@ Translation:
 
 ASR:
   --asr <python|skip>      ASR mode (default: skip)
-  --python-exe <path>      Python executable (default: python)
+  --python-exe <path>      Python executable (default: asr/.venv/Scripts/python.exe)
   --asr-script <path>      Path to asr_cli.py
+  --demucs-script <path>   Path to demucs_cli.py
+  --vocal-threshold <n>    Vocal energy threshold (default: 0.001)
+  --snr-threshold <n>      SNR dB threshold (default: 2.0)
+  --min-hallucination <n>  Min text length to filter (default: 20)
+  --save-audio             Save separated audio stems for debugging
 
 Note: --dlsite with LLM extraction requires --meta-model or --meta-server-url.
       Without these, --dlsite still scrapes DLSite for basic metadata (title, VA,
@@ -91,6 +106,17 @@ function parseCliArgs(): TranslatorConfig {
       asr:               { type: "string" },
       "python-exe":      { type: "string" },
       "asr-script":      { type: "string" },
+      "demucs-script":   { type: "string" },
+      "vocal-threshold": { type: "string" },
+      "snr-threshold": { type: "string" },
+      "vocal-silence-threshold": { type: "string" },
+      "min-hallucination-length": { type: "string" },
+      "reject-negative-snr": { type: "boolean" },
+      "repair-temp": { type: "string" },
+      "repair-beam": { type: "string" },
+      "force-repair": { type: "boolean" },
+      "force-asr": { type: "boolean" },
+      "save-audio": { type: "boolean" },
       help:              { type: "boolean", short: "h" },
     },
     strict: true,
@@ -157,6 +183,15 @@ function parseCliArgs(): TranslatorConfig {
     asrMode: asrMode ?? DEFAULT_CONFIG.asrMode,
     pythonExe: values["python-exe"] ?? DEFAULT_CONFIG.pythonExe,
     asrScript: values["asr-script"],
+    demucsScript: values["demucs-script"],
+    vocalEnergyThreshold: values["vocal-threshold"] ? parseFloat(values["vocal-threshold"]) : DEFAULT_CONFIG.vocalEnergyThreshold,
+    vocalSilenceThreshold: values["vocal-silence-threshold"] ? parseFloat(values["vocal-silence-threshold"]) : DEFAULT_CONFIG.vocalSilenceThreshold,
+    snrThreshold: values["snr-threshold"] ? parseFloat(values["snr-threshold"]) : DEFAULT_CONFIG.snrThreshold,
+    minHallucinationLength: values["min-hallucination-length"] ? parseInt(values["min-hallucination-length"]) : DEFAULT_CONFIG.minHallucinationLength,
+    rejectNegativeSnr: values["reject-negative-snr"] ?? DEFAULT_CONFIG.rejectNegativeSnr,
+    repairTemperature: values["repair-temp"] ? parseFloat(values["repair-temp"]) : DEFAULT_CONFIG.repairTemperature,
+    repairBeamSize: values["repair-beam"] ? parseInt(values["repair-beam"]) : DEFAULT_CONFIG.repairBeamSize,
+    saveAudioStems: values["save-audio"] ?? DEFAULT_CONFIG.saveAudioStems,
   };
 }
 
@@ -365,7 +400,9 @@ async function main() {
       asrMode: config.asrMode,
       pythonExe: config.pythonExe,
       asrScript: config.asrScript,
+      demucsScript: config.demucsScript,
       asrPrompt,
+      saveAudioStems: config.saveAudioStems,
     });
 
     if (!transcript) {
@@ -374,15 +411,78 @@ async function main() {
       continue;
     }
 
-    const cleaned = cleanTranscript(transcript);
+    let { segments: cleaned, mismatches, repairRanges } = cleanTranscript(transcript, {
+      vocalThreshold: config.vocalEnergyThreshold,
+      vocalSilenceThreshold: config.vocalSilenceThreshold,
+      snrThreshold: config.snrThreshold,
+      minHallLength: config.minHallucinationLength,
+      rejectNegativeSnr: config.rejectNegativeSnr,
+      resplitGapSec: config.resplitGapSec,
+      maxRepetitions: config.maxRepetitions,
+    });
+
+    // --- NEW: Surgical ASR Repair ---
+    // 1. Load existing repairs if available
+    const cachedLog = await readSurgicalLog(config.outputDir, track.relativeDir, track.stem);
+    if (cachedLog) {
+      const merged = applySurgicalRepair(cleaned, mismatches, cachedLog);
+      cleaned = merged.segments;
+      mismatches = merged.mismatches;
+    }
+
+    // 2. Re-detect any REMAINING issues (that might need a new repair)
+    const { repairRanges: finalRepairRanges } = cleanTranscript({ ...transcript, segments: cleaned }, {
+      vocalThreshold: config.vocalEnergyThreshold,
+      vocalSilenceThreshold: config.vocalSilenceThreshold,
+      snrThreshold: config.snrThreshold,
+      minHallLength: config.minHallucinationLength,
+      rejectNegativeSnr: config.rejectNegativeSnr,
+      resplitGapSec: config.resplitGapSec,
+      maxRepetitions: config.maxRepetitions,
+    });
+
+    let surgicalLog: any[] = cachedLog || [];
+
+    if (finalRepairRanges.length > 0) {
+      const repaired = await repairTranscription(
+        track.absolutePath,
+        cleaned,
+        mismatches,
+        finalRepairRanges,
+        transcript.demucs_windows || [],
+        {
+          pythonExe: config.pythonExe,
+          asrScript: config.asrScript || "",
+          model: "large-v3-turbo", // default
+          device: "cuda", // default
+          vocalThreshold: config.vocalEnergyThreshold,
+          vocalSilenceThreshold: config.vocalSilenceThreshold,
+          snrThreshold: config.snrThreshold,
+          minHallLength: config.minHallucinationLength,
+          rejectNegativeSnr: config.rejectNegativeSnr,
+          repairTemperature: config.repairTemperature,
+          repairBeamSize: config.repairBeamSize,
+        },
+        surgicalLog
+      );
+      cleaned = repaired.segments;
+      mismatches = repaired.mismatches;
+      surgicalLog = repaired.surgicalLog;
+      
+      // Persist the combined log
+      await writeSurgicalLog(config.outputDir, track.relativeDir, track.stem, surgicalLog);
+    }
+
     if (cleaned.length === 0) {
       console.log(`  Skipped (all segments garbled)`);
+      // Still write an empty transcription so the user knows it was processed
+      await writeTranscription(config.outputDir, track.relativeDir, track.stem, [], mismatches);
       skipped++;
       continue;
     }
     console.log(`  ${cleaned.length} clean segments (${transcript.segments.length - cleaned.length} garbled removed)`);
 
-    await writeTranscription(config.outputDir, track.relativeDir, track.stem, cleaned);
+    await writeTranscription(config.outputDir, track.relativeDir, track.stem, cleaned, mismatches);
     readyTracks.push({ track, cleaned });
   }
 

@@ -48,7 +48,10 @@ export function asrToSegments(cleaned: TranscriptSegment[]): Segment[] {
     text: seg.text,
     start: Math.round(seg.start_time * 1000),
     end: Math.round(seg.end_time * 1000),
-  }));
+    ...(seg.vocal_energy !== undefined ? { vocal_energy: seg.vocal_energy } : {}),
+    ...(seg.other_energy !== undefined ? { other_energy: seg.other_energy } : {}),
+    ...(seg.snr !== undefined ? { snr: seg.snr } : {}),
+  } as Segment));
 }
 
 /**

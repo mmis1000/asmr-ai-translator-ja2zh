@@ -14,12 +14,29 @@ export interface TranscriptSegment {
   avg_logprob: number;
   compression_ratio: number;
   no_speech_prob: number;
+  vocal_energy?: number;
+  other_energy?: number;
+  snr?: number;
+  mismatch?: {
+    type: "missed" | "hallucinated" | "uncertain" | "repeated";
+    reason: string;
+  };
+}
+
+export interface DemucsWindow {
+  start: number;
+  end: number;
+  vocal_rms: number;
+  other_rms: number;
+  snr_db: number;
 }
 
 export interface TranscriptFile {
   full_text: string;
   sentences?: { text: string; start_time: number; end_time: number }[];
   segments: TranscriptSegment[];
+  mismatches?: TranscriptSegment[];
+  demucs_windows?: DemucsWindow[];
 }
 
 // ── Translation I/O types ────────────────────────────────────────────────────
@@ -29,6 +46,9 @@ export interface Segment {
   text: string;
   start: number;  // ms
   end: number;    // ms
+  vocal_energy?: number;
+  other_energy?: number;
+  snr?: number;
 }
 
 export interface TranslationEntry {

@@ -2,44 +2,40 @@ import fs from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 import { spawn, type ChildProcess } from "child_process";
-import type { TranscriptFile, AudioTrack } from "../util/types.js";
+import type { TranscriptFile, AudioTrack, TranscriptSegment, DemucsWindow } from "../util/types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ASR_SCRIPT = path.resolve(__dirname, "../../asr/asr_cli.py");
+const DEFAULT_DEMUCS_SCRIPT = path.resolve(__dirname, "../../asr/demucs_cli.py");
+
+interface DemucsResult {
+  windows: DemucsWindow[];
+}
 
 /**
- * Run Whisper ASR on a single audio file via Python CLI.
- * Uses sentinel-based termination to handle CTranslate2/ROCm hang on Windows.
+ * Generic runner for Python CLI tools with sentinel-based termination.
+ * Used for both ASR (Whisper) and Demucs separation.
  */
-function runWhisperAsr(
+function runPythonCommand(
   pythonExe: string,
-  asrScript: string,
-  audioPath: string,
-  asrPrompt: string,
-  outputPath: string,
-  timeoutMs = 30 * 60 * 1000,
+  scriptPath: string,
+  args: string[],
+  sentinel: string,
+  label: string,
+  timeoutMs: number,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    console.log(`  [ASR] Running Whisper on ${path.basename(audioPath)}`);
+    console.log(`  [${label}] Running ${path.basename(scriptPath)}`);
 
-    const child: ChildProcess = spawn(pythonExe, [
-      "-u",
-      asrScript,
-      "--audio", audioPath,
-      "--prompt", asrPrompt,
-      "--output", outputPath,
-    ]);
+    const child: ChildProcess = spawn(pythonExe, ["-u", scriptPath, ...args]);
 
     const timeout = setTimeout(() => {
       child.kill("SIGKILL");
       setTimeout(() => {
-        reject(new Error(`ASR process timed out after ${timeoutMs / 1000}s`));
+        reject(new Error(`${label} process timed out after ${timeoutMs / 1000}s`));
       }, 1000);
     }, timeoutMs);
 
-    // CTranslate2+ROCm cannot exit cleanly on Windows.
-    // Python prints [ASR_DONE] after flushing JSON, then blocks.
-    const SENTINEL = "[ASR_DONE]";
     let stdoutBuf = "";
     let done = false;
 
@@ -47,26 +43,47 @@ function runWhisperAsr(
       const chunk = data.toString();
       process.stdout.write(chunk);
       stdoutBuf += chunk;
-      if (!done && stdoutBuf.includes(SENTINEL)) {
+      if (!done && stdoutBuf.includes(sentinel)) {
         done = true;
         clearTimeout(timeout);
         child.kill("SIGKILL");
       }
     });
+
     child.stderr?.on("data", (data: Buffer) => process.stderr.write(data));
 
     child.on("close", (code: number | null) => {
       if (done) { resolve(); return; }
-      reject(new Error(`ASR process exited with code ${code}`));
+      reject(new Error(`${label} process exited with code ${code}`));
     });
   });
+}
+
+/**
+ * Average Demucs 1s window data into a Whisper segment.
+ */
+export function mergeEnergyToSegment(seg: TranscriptSegment, windows: DemucsWindow[]) {
+  const start = seg.start_time;
+  const end = seg.end_time;
+  
+  const overlaps = windows.filter(w => w.start < end && w.end > start);
+  if (overlaps.length === 0) return;
+  
+  const sumVocal = overlaps.reduce((acc, w) => acc + w.vocal_rms, 0);
+  const sumOther = overlaps.reduce((acc, w) => acc + w.other_rms, 0);
+  const sumSnr = overlaps.reduce((acc, w) => acc + w.snr_db, 0);
+  
+  seg.vocal_energy = sumVocal / overlaps.length;
+  seg.other_energy = sumOther / overlaps.length;
+  seg.snr = sumSnr / overlaps.length;
 }
 
 /**
  * Get transcription for an audio track.
  *
  * - In "skip" mode: looks for a pre-existing .json file next to the audio file.
- * - In "python" mode: runs Whisper ASR and writes output to the output directory.
+ * - In "python" mode: runs Demucs separation and Whisper ASR.
+ * - Results for both phases are cached in the output directory.
  */
 export async function getTranscription(
   track: AudioTrack,
@@ -75,7 +92,9 @@ export async function getTranscription(
     asrMode: "python" | "skip";
     pythonExe: string;
     asrScript?: string | undefined;
+    demucsScript?: string | undefined;
     asrPrompt?: string | undefined;
+    saveAudioStems?: boolean;
   },
 ): Promise<TranscriptFile | null> {
   if (options.asrMode === "skip") {
@@ -90,34 +109,79 @@ export async function getTranscription(
     }
   }
 
-  // Python ASR mode
+  // Python mode
   const outDir = path.join(outputDir, track.relativeDir);
   await fs.mkdir(outDir, { recursive: true });
-  const outputPath = path.join(outDir, `${track.stem}.raw-transcription.json`);
 
-  // Check if already transcribed (raw cache)
+  const demucsPath = path.join(outDir, `${track.stem}.demucs.json`);
+  const asrPath = path.join(outDir, `${track.stem}.raw-transcription.json`);
+
+  // 1. Demucs Phase (Always run/cache)
+  let demucsData: DemucsResult | null = null;
   try {
-    const content = await fs.readFile(outputPath, "utf-8");
+    const raw = await fs.readFile(demucsPath, "utf-8");
+    demucsData = JSON.parse(raw);
+    console.log(`  [ASR] Using cached Demucs results for ${track.relativePath}`);
+  } catch {
+    const demucsScript = options.demucsScript ?? DEFAULT_DEMUCS_SCRIPT;
+    const demucsArgs = ["--audio", track.absolutePath, "--output", demucsPath];
+    if (options.saveAudioStems) {
+      const demucsOutputDir = path.join(outDir, "demucs_output");
+      await fs.mkdir(demucsOutputDir, { recursive: true });
+      demucsArgs.push("--save-audio", "--audio-output-dir", demucsOutputDir);
+    }
+
+    await runPythonCommand(
+      options.pythonExe,
+      demucsScript,
+      demucsArgs,
+      "[DEMUCS_DONE]",
+      "Demucs",
+      60 * 60 * 1000, // 1h timeout for separation
+    );
+
+    try {
+      const raw = await fs.readFile(demucsPath, "utf-8");
+      demucsData = JSON.parse(raw);
+    } catch {
+      console.error(`  [ASR] Failed to read Demucs output for ${track.relativePath}`);
+    }
+  }
+
+  // 2. Whisper Phase
+  let asrData: TranscriptFile | null = null;
+  try {
+    const raw = await fs.readFile(asrPath, "utf-8");
+    asrData = JSON.parse(raw);
     console.log(`  [ASR] Using cached raw transcription for ${track.relativePath}`);
-    return JSON.parse(content) as TranscriptFile;
   } catch {
-    // Not cached, run ASR
+    const asrScript = options.asrScript ?? DEFAULT_ASR_SCRIPT;
+    const asrArgs = ["--audio", track.absolutePath, "--prompt", options.asrPrompt ?? "", "--output", asrPath];
+
+    await runPythonCommand(
+      options.pythonExe,
+      asrScript,
+      asrArgs,
+      "[ASR_DONE]",
+      "ASR",
+      45 * 60 * 1000,
+    );
+
+    try {
+      const raw = await fs.readFile(asrPath, "utf-8");
+      asrData = JSON.parse(raw);
+    } catch {
+      console.error(`  [ASR] Failed to read ASR output for ${track.relativePath}`);
+    }
   }
 
-  const asrScript = options.asrScript ?? DEFAULT_ASR_SCRIPT;
-  await runWhisperAsr(
-    options.pythonExe,
-    asrScript,
-    track.absolutePath,
-    options.asrPrompt ?? "",
-    outputPath,
-  );
-
-  try {
-    const content = await fs.readFile(outputPath, "utf-8");
-    return JSON.parse(content) as TranscriptFile;
-  } catch {
-    console.error(`  [ASR] Failed to read ASR output for ${track.relativePath}`);
-    return null;
+  // 3. Post-processing: Merge Energy Data
+  if (asrData && demucsData) {
+    asrData.demucs_windows = demucsData.windows;
+    for (const seg of asrData.segments) {
+      mergeEnergyToSegment(seg, demucsData.windows);
+    }
   }
+
+  return asrData;
 }

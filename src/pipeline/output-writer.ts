@@ -15,12 +15,13 @@ export async function writeTranscription(
   relativeDir: string,
   stem: string,
   segments: TranscriptSegment[],
+  mismatches?: TranscriptSegment[],
 ): Promise<void> {
   const dir = path.join(outputDir, relativeDir);
   await ensureDir(dir);
   await fs.writeFile(
     path.join(dir, `${stem}.transcription.json`),
-    JSON.stringify({ segments }, null, 2),
+    JSON.stringify({ segments, mismatches }, null, 2),
     "utf-8",
   );
 }
@@ -81,4 +82,36 @@ export async function writeMetadata(
     JSON.stringify(metadata, null, 2),
     "utf-8",
   );
+}
+
+/** Write surgical repair log if any repairs were attempted. */
+export async function writeSurgicalLog(
+  outputDir: string,
+  relativeDir: string,
+  stem: string,
+  surgicalLog: any[],
+): Promise<void> {
+  if (surgicalLog.length === 0) return;
+  const dir = path.join(outputDir, relativeDir);
+  await ensureDir(dir);
+  await fs.writeFile(
+    path.join(dir, `${stem}.surgical.json`),
+    JSON.stringify(surgicalLog, null, 2),
+    "utf-8",
+  );
+}
+
+/** Read surgical repair log if it exists. */
+export async function readSurgicalLog(
+  outputDir: string,
+  relativeDir: string,
+  stem: string,
+): Promise<any[] | null> {
+  const filePath = path.join(outputDir, relativeDir, `${stem}.surgical.json`);
+  try {
+    const raw = await fs.readFile(filePath, "utf-8");
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }

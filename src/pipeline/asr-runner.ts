@@ -93,12 +93,12 @@ export async function getTranscription(
   // Python ASR mode
   const outDir = path.join(outputDir, track.relativeDir);
   await fs.mkdir(outDir, { recursive: true });
-  const outputPath = path.join(outDir, `${track.stem}.transcription.json`);
+  const outputPath = path.join(outDir, `${track.stem}.raw-transcription.json`);
 
-  // Check if already transcribed
+  // Check if already transcribed (raw cache)
   try {
     const content = await fs.readFile(outputPath, "utf-8");
-    console.log(`  [ASR] Using cached transcription for ${track.relativePath}`);
+    console.log(`  [ASR] Using cached raw transcription for ${track.relativePath}`);
     return JSON.parse(content) as TranscriptFile;
   } catch {
     // Not cached, run ASR

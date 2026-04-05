@@ -66,92 +66,104 @@ def main():
         print(f"Error: File not found: {args.audio}", file=sys.stderr)
         sys.exit(1)
         
-    print(f"Loading Demucs model '{args.model}' on {args.device}...", flush=True)
-    
-    # Build a minimal Namespace that get_model_from_args expects
-    # (Matches demucs.separate.get_parser defaults)
-    model_args = argparse.Namespace(
-        name=args.model,
-        repo=None,
-        models=None,
-        store=None,
-    )
-    
-    try:
-        model = get_model_from_args(model_args)
-    except Exception as e:
-        print(f"Error loading model: {e}", file=sys.stderr)
-        sys.exit(1)
-        
-    model.to(args.device)
-    model.eval()
+    # ── Check for existing stems ─────────────────────────────────────────────
+    # If -save-audio is on, check the provided dir. Otherwise check JSON dir.
+    out_dir = args.audio_output_dir if args.audio_output_dir else os.path.dirname(os.path.abspath(args.output))
+    stem = os.path.splitext(os.path.basename(args.audio))[0]
+    vocal_path = os.path.join(out_dir, f"{stem}.vocals.wav")
+    other_path = os.path.join(out_dir, f"{stem}.other.wav")
 
-    print(f"Separating stems for {os.path.basename(args.audio)}...", flush=True)
-    # Load audio using Demucs' internal loader (handles ffmpeg/torchaudio)
-    wav = load_track(args.audio, model.audio_channels, model.samplerate)
-    
-    # Normalization (Matches demucs.separate main logic)
-    ref = wav.mean(0)
-    wav -= ref.mean()
-    wav /= ref.std()
-    
-    # Apply model
-    # apply_model returns [sources, channels, samples]
-    with torch.no_grad():
-        sources = apply_model(model, wav[None], device=args.device, shifts=1, split=True, overlap=0.25, progress=True)[0]
-    
-    # Denormalize
-    sources *= ref.std()
-    sources += ref.mean()
-    
-    # Demucs sources for htdemucs: ['drums', 'bass', 'other', 'vocals']
-    source_names = model.sources
-    vocal_idx = source_names.index('vocals')
-    
-    # Average across channels (to mono) for analysis
-    # sources: [sources, channels, samples]
-    stems_mono = sources.mean(dim=1).cpu().numpy()
-    
-    vocal_stem = stems_mono[vocal_idx]
-    
-    # Create a combined 'other' stem by summing everything else
-    other_indices = [i for i, name in enumerate(source_names) if name != 'vocals']
-    other_stem = stems_mono[other_indices].sum(axis=0)
-    
-    analysis_audio = np.stack([vocal_stem, other_stem])
-    
+    if os.path.exists(vocal_path) and os.path.exists(other_path):
+        print(f"Found existing stems, skipping separation: {vocal_path}", flush=True)
+        # Load existing stems
+        v_data, v_sr = sf.read(vocal_path)
+        o_data, o_sr = sf.read(other_path)
+        
+        # Ensure they are 1D (mono) for energy analysis
+        if len(v_data.shape) > 1: v_data = v_data.mean(axis=1)
+        if len(o_data.shape) > 1: o_data = o_data.mean(axis=1)
+        
+        # We need to make sure they have the same length (they should)
+        min_len = min(len(v_data), len(o_data))
+        v_data = v_data[:min_len]
+        o_data = o_data[:min_len]
+        
+        analysis_audio = np.stack([v_data, o_data])
+        samplerate = v_sr
+        print(f"Energy analysis using existing stems at {samplerate}Hz...", flush=True)
+    else:
+        # ── Standard Separation Path ──────────────────────────────────────────
+        print(f"Loading Demucs model '{args.model}' on {args.device}...", flush=True)
+        
+        # Build a minimal Namespace that get_model_from_args expects
+        model_args = argparse.Namespace(
+            name=args.model,
+            repo=None,
+            models=None,
+            store=None,
+        )
+        
+        try:
+            model = get_model_from_args(model_args)
+        except Exception as e:
+            print(f"Error loading model: {e}", file=sys.stderr)
+            sys.exit(1)
+            
+        model.to(args.device)
+        model.eval()
+
+        print(f"Separating stems for {os.path.basename(args.audio)}...", flush=True)
+        # Load audio using Demucs' internal loader (handles ffmpeg/torchaudio)
+        wav = load_track(args.audio, model.audio_channels, model.samplerate)
+        
+        # Normalization (Matches demucs.separate main logic)
+        ref = wav.mean(0)
+        wav -= ref.mean()
+        wav /= ref.std()
+        
+        # Apply model
+        with torch.no_grad():
+            sources = apply_model(model, wav[None], device=args.device, shifts=1, split=True, overlap=0.25, progress=True)[0]
+        
+        # Denormalize
+        sources *= ref.std()
+        sources += ref.mean()
+        
+        # Extract stems
+        source_names = model.sources
+        vocal_idx = source_names.index('vocals')
+        stems_mono = sources.mean(dim=1).cpu().numpy()
+        vocal_stem = stems_mono[vocal_idx]
+        other_indices = [i for i, name in enumerate(source_names) if name != 'vocals']
+        other_stem = stems_mono[other_indices].sum(axis=0)
+        
+        analysis_audio = np.stack([vocal_stem, other_stem])
+        samplerate = model.samplerate
+
+        if args.save_audio:
+            os.makedirs(out_dir, exist_ok=True)
+            # Save using soundfile directly
+            print(f"Saving vocal stem to {vocal_path}...", flush=True)
+            sf.write(vocal_path, sources[vocal_idx].cpu().numpy().T, model.samplerate)
+            
+            # Combine other stems for the 'other' output
+            other_stems_raw = sources[other_indices].sum(dim=0).cpu().numpy().T
+            print(f"Saving 'other' stem to {other_path}...", flush=True)
+            sf.write(other_path, other_stems_raw, model.samplerate)
+
+    # ── Final Analysis & JSON ────────────────────────────────────────────────
     print("Calculating energy metrics (1s windows)...", flush=True)
-    results = calculate_fine_energy(analysis_audio, model.samplerate)
+    results = calculate_fine_energy(analysis_audio, samplerate)
     
     output_data = {
-        "model": args.model,
-        "samplerate": model.samplerate,
+        "model": args.model if 'args' in locals() and hasattr(args, 'model') else "htdemucs", # fallback if reuse
+        "samplerate": samplerate,
         "windows": results
     }
     
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(output_data, f, indent=2)
-    
-    if args.save_audio:
-        # Use provided audio-output-dir or fallback to JSON dir
-        out_dir = args.audio_output_dir if args.audio_output_dir else os.path.dirname(os.path.abspath(args.output))
-        os.makedirs(out_dir, exist_ok=True)
-        
-        # Get track name from input audio
-        stem = os.path.splitext(os.path.basename(args.audio))[0]
-        vocal_path = os.path.join(out_dir, f"{stem}.vocals.wav")
-        other_path = os.path.join(out_dir, f"{stem}.other.wav")
-        
-        # Save using soundfile directly to avoid torchaudio/torchcodec dependency issues
-        # sources[vocal_idx] is [channels, samples], sf.write expects [samples, channels]
-        print(f"Saving vocal stem to {vocal_path}...", flush=True)
-        sf.write(vocal_path, sources[vocal_idx].cpu().numpy().T, model.samplerate)
-        
-        # Combine other stems for the 'other' output
-        other_stems_raw = sources[other_indices].sum(dim=0).cpu().numpy().T
-        print(f"Saving 'other' stem to {other_path}...", flush=True)
-        sf.write(other_path, other_stems_raw, model.samplerate)
         
     print(f"Demucs analysis complete. Results saved to {args.output}", flush=True)
 

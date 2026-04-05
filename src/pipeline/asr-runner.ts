@@ -124,11 +124,12 @@ export async function getTranscription(
     console.log(`  [ASR] Using cached Demucs results for ${track.relativePath}`);
   } catch {
     const demucsScript = options.demucsScript ?? DEFAULT_DEMUCS_SCRIPT;
-    const demucsArgs = ["--audio", track.absolutePath, "--output", demucsPath];
+    const demucsOutputDir = path.join(outDir, "demucs_output");
+    const demucsArgs = ["--audio", track.absolutePath, "--output", demucsPath, "--audio-output-dir", demucsOutputDir];
+    
     if (options.saveAudioStems) {
-      const demucsOutputDir = path.join(outDir, "demucs_output");
       await fs.mkdir(demucsOutputDir, { recursive: true });
-      demucsArgs.push("--save-audio", "--audio-output-dir", demucsOutputDir);
+      demucsArgs.push("--save-audio");
     }
 
     await runPythonCommand(
@@ -156,7 +157,11 @@ export async function getTranscription(
     console.log(`  [ASR] Using cached raw transcription for ${track.relativePath}`);
   } catch {
     const asrScript = options.asrScript ?? DEFAULT_ASR_SCRIPT;
-    const asrArgs = ["--audio", track.absolutePath, "--prompt", options.asrPrompt ?? "", "--output", asrPath];
+    const asrArgs = [
+      "--audio", track.absolutePath, 
+      "--prompt", options.asrPrompt ?? "", 
+      "--output", asrPath,
+    ];
 
     await runPythonCommand(
       options.pythonExe,

@@ -1,10 +1,14 @@
 import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import type { TranscriptSegment, TranscriptFile, DemucsWindow } from "../util/types.js";
 import type { TimeRange } from "./transcript-cleaner.js";
 import { isGarbled } from "./transcript-cleaner.js";
 import { mergeEnergyToSegment } from "./asr-runner.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DEFAULT_ASR_SCRIPT = path.resolve(__dirname, "../../asr/asr_cli.py");
 
 interface RepairOptions {
   pythonExe: string;
@@ -16,8 +20,10 @@ interface RepairOptions {
   vocalSilenceThreshold: number;
   minHallLength: number;
   rejectNegativeSnr: boolean;
-  repairTemperature: number;
+  repairTemperature: number | null;
   repairBeamSize: number;
+  repairWithVocal: boolean;
+  asrPrompt?: string | undefined;
 }
 
 /**
@@ -42,7 +48,8 @@ export async function repairTranscription(
   repairRanges: TimeRange[],
   windows: DemucsWindow[],
   options: RepairOptions,
-  existingLog: SurgicalRepairEntry[] = []
+  existingLog: SurgicalRepairEntry[] = [],
+  vocalPath?: string
 ): Promise<{ 
   segments: TranscriptSegment[]; 
   mismatches: TranscriptSegment[];
@@ -76,6 +83,10 @@ export async function repairTranscription(
   let currentMismatches = [...initialMismatches];
   const surgicalLog = [...existingLog];
 
+  // Derive the output directory for temp files (if vocalPath is provided, it's inside demucs_output)
+  // Otherwise default to the dirname of the audioPath (original behavior, but usually we have vocalPath now)
+  const tempDir = vocalPath ? path.dirname(path.dirname(vocalPath)) : path.dirname(audioPath);
+
   for (const range of windowsToRepair) {
     console.log(`  -> Repairing [${range.start.toFixed(1)}s - ${range.end.toFixed(1)}s] (${range.reason})...`);
 
@@ -83,11 +94,28 @@ export async function repairTranscription(
     const originalInRange = initialSegments.filter(s => 
       s.start_time >= range.start && s.end_time <= range.end
     );
+    const mismatchesInRange = initialMismatches.filter(m => 
+      m.start_time >= range.start && m.end_time <= range.end
+    );
+    mismatchesInRange.forEach(m => {
+      console.log(`     - [${m.mismatch?.type}] ${m.mismatch?.reason}`);
+    });
 
-    const repairFile = path.join(path.dirname(audioPath), `.tmp_repair_${range.start.toFixed(0)}.json`);
+    const repairFile = path.join(tempDir, `.tmp_repair_${range.start.toFixed(0)}.json`);
     
     try {
-      const newSegments = await runSurgicalWhisper(audioPath, range, repairFile, options);
+      // Choose input audio: vocal stem if requested and available, else original
+      let inputAudio = audioPath;
+      if (options.repairWithVocal && vocalPath) {
+        if (fs.existsSync(vocalPath)) {
+          inputAudio = vocalPath;
+          console.log(`     - Using vocal stem for repair: ${path.basename(vocalPath)}`);
+        } else {
+          console.warn(`     - Warning: Vocal stem requested but NOT found at ${vocalPath}. Falling back to original audio.`);
+        }
+      }
+
+      const newSegments = await runSurgicalWhisper(inputAudio, range, repairFile, options);
       
       const repairEntry: SurgicalRepairEntry = {
         range,
@@ -120,7 +148,7 @@ export async function repairTranscription(
             snrThreshold: options.snrThreshold,
             minHallLength: options.minHallLength,
             rejectNegativeSnr: options.rejectNegativeSnr,
-          });
+          }, true);
 
           if (!garbled) {
             passed.push(s);
@@ -141,13 +169,19 @@ export async function repairTranscription(
         console.log(`     Repair produced no new content.`);
       }
 
-      surgicalLog.push(repairEntry);
+      if (repairEntry.status !== "no_change") {
+        surgicalLog.push(repairEntry);
+      }
     } catch (err) {
       console.error(`     Repair failed for range ${range.start}-${range.end}:`, err);
     } finally {
       if (fs.existsSync(repairFile)) fs.unlinkSync(repairFile);
     }
   }
+
+  // Final sort to ensure chronological order before returning
+  currentSegments.sort((a, b) => a.start_time - b.start_time);
+  currentMismatches.sort((a, b) => a.start_time - b.start_time);
 
   return { 
     segments: currentSegments, 
@@ -202,32 +236,53 @@ async function runSurgicalWhisper(
   options: RepairOptions
 ): Promise<TranscriptSegment[]> {
   return new Promise((resolve, reject) => {
+    const asrScript = options.asrScript || DEFAULT_ASR_SCRIPT;
+
     // Non-greedy settings to break loops: configurable temp/beam, no condition on previous
     const args = [
-      options.asrScript,
+      asrScript,
       "--audio", audioPath,
       "--output", outputJson,
       "--model", options.model,
       "--device", options.device,
       "--start", range.start.toString(),
       "--end", range.end.toString(),
-      "--temperature", options.repairTemperature.toString(),
       "--beam-size", options.repairBeamSize.toString(),
-      "--no-condition"
     ];
 
-    const child = spawn(options.pythonExe, args);
+    if (options.repairTemperature !== null) {
+      args.push("--temperature", options.repairTemperature.toString());
+    }
+
+    if (options.asrPrompt) {
+      args.push("--prompt", options.asrPrompt);
+    }
+
+    const child = spawn(options.pythonExe, ["-u", ...args]);
     let output = "";
+    let done = false;
 
     child.stdout.on("data", (data) => {
-      output += data.toString();
+      const chunk = data.toString();
+      process.stdout.write(chunk);
+      output += chunk;
       // Handle the ROCm hang sentinel
-      if (output.includes("[ASR_DONE]")) {
+      if (!done && output.includes("[ASR_DONE]")) {
+        done = true;
         child.kill("SIGKILL");
       }
     });
 
+    child.stderr?.on("data", (data) => process.stderr.write(data));
+
     child.on("close", (code) => {
+      if (done) {
+        // Sentinel reached, success regardless of exit code (which will be null due to SIGKILL)
+      } else if (code !== 0) {
+        reject(new Error(`Surgical ASR process failed with code ${code}`));
+        return;
+      }
+
       if (!fs.existsSync(outputJson)) {
         resolve([]);
         return;

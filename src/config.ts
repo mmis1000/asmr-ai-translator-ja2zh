@@ -52,8 +52,12 @@ export interface TranslatorConfig {
   rejectNegativeSnr: boolean;
   resplitGapSec: number;
   maxRepetitions: number;
-  repairTemperature: number;
+  repairTemperature: number | null;
   repairBeamSize: number;
+  repairWithVocal: boolean;
+  saveAudio: boolean;
+  asrPrompt: string;
+  repairLargeV3: boolean;
   saveAudioStems: boolean;
 
   // Paths
@@ -93,8 +97,12 @@ export const DEFAULT_CONFIG: Omit<TranslatorConfig,
   rejectNegativeSnr: true,
   resplitGapSec: 1.0,
   maxRepetitions: 3,
-  repairTemperature: 0.6,
+  repairTemperature: null,
   repairBeamSize: 10,
+  saveAudio: false,
+  repairWithVocal: false,
+  asrPrompt: "",
+  repairLargeV3: false,
   saveAudioStems: false,
   debugLog:       false,
 };

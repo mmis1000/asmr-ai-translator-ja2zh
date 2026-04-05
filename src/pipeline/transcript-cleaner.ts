@@ -22,12 +22,15 @@ function resplitSegment(seg: TranscriptSegment, gapThresholdSec: number): Transc
     const gap = words[i]!.start_time - words[i - 1]!.end_time;
     const prevWord = words[i - 1]!;
     
+    // Check for terminal punctuation at end of previous word (legit break)
+    const endsWithTerminalPunc = /[。！？!?]$/.test(prevWord.text.trim());
+    
     const isSilenceToken = /^[\s…・。、！？!?]+$/.test(prevWord.text) && prevWord.text.includes("…");
     const prevIsLongSilence =
       isSilenceToken &&
       prevWord.end_time - prevWord.start_time >= gapThresholdSec;
 
-    if (gap >= gapThresholdSec || prevIsLongSilence) {
+    if (gap >= gapThresholdSec || prevIsLongSilence || endsWithTerminalPunc) {
       groups.push(current);
       current = [words[i]!];
     } else {
@@ -66,6 +69,7 @@ export function isGarbled(
     minHallLength: number;
     rejectNegativeSnr: boolean;
   },
+  isRepair: boolean = false
 ): boolean {
   // Capture signal status from Demucs
   const hasSignalInfo = seg.vocal_energy !== undefined && seg.snr !== undefined;
@@ -123,6 +127,91 @@ export function isGarbled(
   const effective = text.replace(/[\s\p{P}\p{S}]/gu, "");
   if (effective.length < 2) return true;
 
+  // 5. Impossible Speed Check (CPS)
+  // Human speech is typically 5-15 CPS. 25+ is almost certainly hallucinated garbage.
+  const cps = effective.length / Math.max(0.1, duration);
+  if (cps > 25 && effective.length > 10) {
+    seg.mismatch = {
+      type: "hallucinated",
+      reason: `Impossible speech speed detected (${cps.toFixed(1)} CPS). Whisper 'vomited' text.`,
+    };
+    return true;
+  }
+
+  // 6. Multi-character loop detection (e.g., "うぅうぅ" or "らららら")
+  if (effective.length > 10) {
+    const counts: Record<string, number> = {};
+    for (const char of effective) {
+      counts[char] = (counts[char] || 0) + 1;
+    }
+    
+    const sortedCounts = Object.values(counts).sort((a, b) => b - a);
+    const top1 = sortedCounts[0] || 0;
+    const top2 = sortedCounts[1] || 0;
+    const total = effective.length;
+
+    // Single character loop (>60%) or dual-character loop (>85%)
+    if ((top1 / total > 0.6) || ((top1 + top2) / total > 0.85 && total > 20)) {
+      seg.mismatch = {
+        type: "hallucinated",
+        reason: `Repetitive character loop detected (${((top1 + top2) / total * 100).toFixed(0)}% of text consists of top 2 characters)`,
+      };
+      return true;
+    }
+  }
+
+  // 8. Hallucination "Heat" Filter (Co-occurrence of quality issues)
+  // If Whisper rejected this (Scenario A) but signal is present, we are more strict.
+  const isWhisperHeated = seg.avg_logprob < -2.5;
+  const isWhisperTerminal = seg.avg_logprob < -3.5;
+
+  // Mixed Script Check: Japanese text mixed with random Latin words
+  const latinCount = (text.match(/[a-zA-Z]/g) || []).length;
+  const cjkCount = (text.match(/[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF]/g) || []).length;
+  const isMixedScript = cjkCount > 5 && latinCount / (cjkCount + latinCount) > 0.3;
+
+  if (isWhisperTerminal) {
+    seg.mismatch = {
+      type: "hallucinated",
+      reason: `Extreme low quality (logprob: ${seg.avg_logprob.toFixed(2)}). Impossible recovery.`,
+    };
+    return true;
+  }
+
+  if (isWhisperHeated && (isMixedScript || cps > 20)) {
+    seg.mismatch = {
+      type: "hallucinated",
+      reason: `Moderate low quality (${seg.avg_logprob.toFixed(2)}) combined with junk signal (MixedScripts: ${isMixedScript}, CPS: ${cps.toFixed(1)}).`,
+    };
+    return true;
+  }
+
+  // 9. Common 'Outro' hallucinations (Repair-only)
+  // These are common when Whisper forces transcription in silent blocks.
+  // We only filter them in repair mode to avoid deleting real "Goodnight" lines.
+  if (isRepair) {
+    const OUTRO_PATTERNS = [
+      /^[おオ]やすみなさい[。！]?$/i,
+      /^ご視聴ありがとうございました[。！]?$/i,
+      /^チャンネル登録[。、]?よろしくお願いします[。！]?$/i,
+      /^チャンネル登録よろしくお願いします[。！]?$/i,
+      /^次回の動画でお会いしましょう[。！]?$/i,
+      /^動画を聞いてくれてありがとう[。！]?$/i,
+      /^動画を見てくれてありがとう[。！]?$/i,
+      /^高評価[、。]?よろしくお願いします[。！]?$/i,
+      /^[バパ]イ[バパ]イ[。！]?$/i,
+      /^またね[。！]?$/i,
+    ];
+
+    if (OUTRO_PATTERNS.some(re => re.test(text.trim()))) {
+      seg.mismatch = {
+        type: "hallucinated",
+        reason: "Detected common Whisper 'outro' hallucination in repair pass.",
+      };
+      return true;
+    }
+  }
+
   return false;
 }
 
@@ -141,14 +230,17 @@ function detectMissedSpeech(
   // 1. Group continuous active windows into single SignalBlocks
   const blocks: DemucsWindow[][] = [];
   let currentBlock: DemucsWindow[] = [];
+  const MAX_BLOCK_DURATION = 30.0; // Split long noisy blocks
   
   for (const win of windows) {
     const isActive = win.vocal_rms > vocalThreshold && win.snr_db > snrThreshold;
-    if (isActive) {
+    const currentDuration = currentBlock.length > 0 ? win.end - currentBlock[0]!.start : 0;
+
+    if (isActive && currentDuration < MAX_BLOCK_DURATION) {
       currentBlock.push(win);
     } else if (currentBlock.length > 0) {
       blocks.push(currentBlock);
-      currentBlock = [];
+      currentBlock = (isActive) ? [win] : [];
     }
   }
   if (currentBlock.length > 0) blocks.push(currentBlock);
@@ -227,7 +319,7 @@ export function cleanTranscript(
 
   const cleaned = expanded.filter((s, i) => {
     const isRepeated = repeatedIndices.has(i);
-    const garbled = isGarbled(s, options);
+    const garbled = isGarbled(s, options, false);
     
     if (isRepeated) {
       s.mismatch = {
@@ -349,11 +441,15 @@ function identifyRepairRanges(
   const merged: TimeRange[] = [];
   let current = { ...rawRanges[0]! };
   const PADDING = 2.0; // 2s padding for context
+  const MAX_RANGE_DURATION = 60.0; // Prevent huge repair ranges
+  const MAX_MERGE_GAP = 5.0; // Be more selective with merging
 
   for (let i = 1; i < rawRanges.length; i++) {
     const next = rawRanges[i]!;
-    // If gaps are small (< 10s), merge them into one re-run window to avoid overhead
-    if (next.start <= current.end + 10.0) {
+    const wouldBeDuration = next.end - current.start;
+
+    // If gaps are small (< 5s) AND the range doesn't get too long, merge them
+    if (next.start <= current.end + MAX_MERGE_GAP && wouldBeDuration <= MAX_RANGE_DURATION) {
       current.end = Math.max(current.end, next.end);
       if (!current.reason.includes(next.reason)) current.reason += `+${next.reason}`;
     } else {

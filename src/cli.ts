@@ -72,6 +72,7 @@ ASR:
   --vocal-threshold <n>    Vocal energy threshold (default: 0.001)
   --snr-threshold <n>      SNR dB threshold (default: 2.0)
   --min-hallucination <n>  Min text length to filter (default: 20)
+  --repair-with-vocal      Use Demucs vocal stem for repair pass (forces --save-audio)
   --save-audio             Save separated audio stems for debugging
 
 Note: --dlsite with LLM extraction requires --meta-model or --meta-server-url.
@@ -116,7 +117,9 @@ function parseCliArgs(): TranslatorConfig {
       "repair-beam": { type: "string" },
       "force-repair": { type: "boolean" },
       "force-asr": { type: "boolean" },
+      "repair-with-vocal": { type: "boolean" },
       "save-audio": { type: "boolean" },
+      "repair-large-v3": { type: "boolean" },
       help:              { type: "boolean", short: "h" },
     },
     strict: true,
@@ -191,7 +194,9 @@ function parseCliArgs(): TranslatorConfig {
     rejectNegativeSnr: values["reject-negative-snr"] ?? DEFAULT_CONFIG.rejectNegativeSnr,
     repairTemperature: values["repair-temp"] ? parseFloat(values["repair-temp"]) : DEFAULT_CONFIG.repairTemperature,
     repairBeamSize: values["repair-beam"] ? parseInt(values["repair-beam"]) : DEFAULT_CONFIG.repairBeamSize,
-    saveAudioStems: values["save-audio"] ?? DEFAULT_CONFIG.saveAudioStems,
+    repairWithVocal:   values["repair-with-vocal"] ?? DEFAULT_CONFIG.repairWithVocal,
+    saveAudioStems:    (values["repair-with-vocal"] ?? DEFAULT_CONFIG.repairWithVocal) ? true : (values["save-audio"] ?? DEFAULT_CONFIG.saveAudioStems),
+    repairLargeV3:     values["repair-large-v3"]   ?? DEFAULT_CONFIG.repairLargeV3,
   };
 }
 
@@ -444,6 +449,8 @@ async function main() {
     let surgicalLog: any[] = cachedLog || [];
 
     if (finalRepairRanges.length > 0) {
+      const vocalPath = path.join(config.outputDir, track.relativeDir, "demucs_output", `${track.stem}.vocals.wav`);
+
       const repaired = await repairTranscription(
         track.absolutePath,
         cleaned,
@@ -453,7 +460,7 @@ async function main() {
         {
           pythonExe: config.pythonExe,
           asrScript: config.asrScript || "",
-          model: "large-v3-turbo", // default
+          model: config.repairLargeV3 ? "large-v3" : "large-v3-turbo",
           device: "cuda", // default
           vocalThreshold: config.vocalEnergyThreshold,
           vocalSilenceThreshold: config.vocalSilenceThreshold,
@@ -462,8 +469,11 @@ async function main() {
           rejectNegativeSnr: config.rejectNegativeSnr,
           repairTemperature: config.repairTemperature,
           repairBeamSize: config.repairBeamSize,
+          repairWithVocal: config.repairWithVocal,
+          asrPrompt,
         },
-        surgicalLog
+        surgicalLog,
+        vocalPath
       );
       cleaned = repaired.segments;
       mismatches = repaired.mismatches;

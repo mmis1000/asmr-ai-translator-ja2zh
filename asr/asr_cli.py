@@ -34,9 +34,8 @@ def main():
     parser.add_argument("--model", default="large-v3-turbo", help="Whisper model size")
     parser.add_argument("--start", type=float, help="Clip start time in seconds")
     parser.add_argument("--end", type=float, help="Clip end time in seconds")
-    parser.add_argument("--temperature", type=float, default=0, help="Whisper temperature")
+    parser.add_argument("--temperature", type=float, help="Whisper temperature")
     parser.add_argument("--beam-size", type=int, default=5, help="Beam size")
-    parser.add_argument("--no-condition", action="store_true", help="Disable condition_on_previous_text")
 
     args = parser.parse_args()
 
@@ -52,7 +51,7 @@ def main():
         clip_end=args.end,
         temperature=args.temperature,
         beam_size=args.beam_size,
-        condition_on_previous_text=not args.no_condition
+        condition_on_previous_text=True
     )
 
     output_data = {

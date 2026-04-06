@@ -23,7 +23,10 @@ interface RepairOptions {
   repairTemperature: number | null;
   repairBeamSize: number;
   repairWithVocal: boolean;
+  mixWeight: number; // Weight for mixing original audio back into vocals
   asrPrompt?: string | undefined;
+  useMmsRepair?: boolean;
+  useQwenRepair?: boolean;
 }
 
 /**
@@ -106,16 +109,34 @@ export async function repairTranscription(
     try {
       // Choose input audio: vocal stem if requested and available, else original
       let inputAudio = audioPath;
+      let mixAudio: string | undefined = undefined;
+
       if (options.repairWithVocal && vocalPath) {
         if (fs.existsSync(vocalPath)) {
           inputAudio = vocalPath;
-          console.log(`     - Using vocal stem for repair: ${path.basename(vocalPath)}`);
+          mixAudio = audioPath; // Mix-back the original audio
+          console.log(`     - Using mixed vocal stem for repair: ${path.basename(vocalPath)} (+ ${Math.round(options.mixWeight * 100)}% original)`);
         } else {
           console.warn(`     - Warning: Vocal stem requested but NOT found at ${vocalPath}. Falling back to original audio.`);
         }
       }
 
-      const newSegments = await runSurgicalWhisper(inputAudio, range, repairFile, options);
+      let newSegments: TranscriptSegment[] = [];
+
+      if (options.useQwenRepair) {
+        console.log(`     - Using Qwen engine for repair (Full Switch)...`);
+        newSegments = await runSurgicalASR(inputAudio, range, repairFile, options, mixAudio, "qwen");
+      } else if (options.useMmsRepair) {
+        console.log(`     - Using MMS engine for repair (Full Switch)...`);
+        const clusters = getSpeechClusters(windows, range, options.vocalThreshold, options.snrThreshold);
+        console.log(`     - Batching ${clusters.length} speech cluster(s) for MMS engine.`);
+        
+        if (clusters.length > 0) {
+           newSegments = await runSurgicalASR(inputAudio, clusters, repairFile, options, mixAudio, "mms");
+        }
+      } else {
+        newSegments = await runSurgicalASR(inputAudio, range, repairFile, options, mixAudio, "whisper");
+      }
       
       const repairEntry: SurgicalRepairEntry = {
         range,
@@ -229,33 +250,111 @@ export function applySurgicalRepair(
   return { segments: currentSegments, mismatches: currentMismatches };
 }
 
-async function runSurgicalWhisper(
-  audioPath: string,
+/**
+ * Groups contiguous Demucs windows that exceed vocal energy and SNR thresholds
+ * to identify speech regions for MMS pre-slicing.
+ */
+function getSpeechClusters(
+  windows: DemucsWindow[],
   range: TimeRange,
+  vocalThreshold: number,
+  snrThreshold: number
+): TimeRange[] {
+  const MAX_GAP = 1.2;   // Merge gaps <= 1.2s
+  const PADDING = 0.2;   // Adding padding to avoid cut-offs
+  const MIN_DURATION = 1.5; // Ensure at least 1.5s per cluster
+
+  // Find windows that overlap with this range and meet thresholds
+  const relevant = windows.filter(w => 
+    w.start < range.end && w.end > range.start &&
+    w.vocal_rms >= vocalThreshold && 
+    w.snr_db >= snrThreshold
+  );
+
+  if (relevant.length === 0) return [];
+
+  const initialClusters: TimeRange[] = [];
+  let current: TimeRange | null = null;
+
+  for (const w of relevant) {
+    if (!current) {
+      current = { start: Math.max(w.start, range.start), end: Math.min(w.end, range.end), reason: "mms_cluster" };
+    } else {
+      // Merge if the gap between windows is within MAX_GAP
+      if (w.start <= current.end + MAX_GAP) {
+        current.end = Math.min(w.end, range.end);
+      } else {
+        initialClusters.push(current);
+        current = { start: Math.max(w.start, range.start), end: Math.min(w.end, range.end), reason: "mms_cluster" };
+      }
+    }
+  }
+  if (current) initialClusters.push(current);
+
+  // Post-process: Add padding and enforce minimum duration
+  return initialClusters.map(c => {
+    let start = Math.max(range.start, c.start - PADDING);
+    let end = Math.min(range.end, c.end + PADDING);
+    
+    const dur = end - start;
+    if (dur < MIN_DURATION) {
+      const needed = MIN_DURATION - dur;
+      // Expand around the center
+      const center = (start + end) / 2;
+      start = Math.max(range.start, center - MIN_DURATION / 2);
+      end = Math.min(range.end, start + MIN_DURATION);
+      // Re-boundary check in case end overflowed range.end
+      if (end > range.end) {
+        end = range.end;
+        start = Math.max(range.start, end - MIN_DURATION);
+      }
+    }
+    
+    return { start, end, reason: "mms_cluster" };
+  });
+}
+
+async function runSurgicalASR(
+  audioPath: string,
+  range: TimeRange | TimeRange[],
   outputJson: string,
-  options: RepairOptions
+  options: RepairOptions,
+  mixAudioPath: string | undefined,
+  engine: "whisper" | "mms" | "qwen"
 ): Promise<TranscriptSegment[]> {
   return new Promise((resolve, reject) => {
     const asrScript = options.asrScript || DEFAULT_ASR_SCRIPT;
 
-    // Non-greedy settings to break loops: configurable temp/beam, no condition on previous
     const args = [
       asrScript,
       "--audio", audioPath,
       "--output", outputJson,
       "--model", options.model,
       "--device", options.device,
-      "--start", range.start.toString(),
-      "--end", range.end.toString(),
-      "--beam-size", options.repairBeamSize.toString(),
+      "--engine", engine,
     ];
 
-    if (options.repairTemperature !== null) {
-      args.push("--temperature", options.repairTemperature.toString());
+    if ((engine === "whisper" || engine === "qwen") && !Array.isArray(range)) {
+      args.push("--start", range.start.toFixed(3));
+      args.push("--end", range.end.toFixed(3));
+      if (engine === "whisper") {
+        args.push("--beam-size", options.repairBeamSize.toString());
+        if (options.repairTemperature !== null) {
+          args.push("--temperature", options.repairTemperature.toString());
+        }
+      }
+      if (options.asrPrompt) {
+        args.push("--prompt", options.asrPrompt);
+      }
+    } else if (engine === "mms") {
+      const ranges = Array.isArray(range) ? range : [range];
+      const intervals = ranges.map(r => `${r.start.toFixed(3)},${r.end.toFixed(3)}`).join("|");
+      args.push("--intervals", intervals);
     }
 
-    if (options.asrPrompt) {
-      args.push("--prompt", options.asrPrompt);
+    if (mixAudioPath) {
+      args.push("--mix-audio", mixAudioPath);
+      args.push("--mix-weight", options.mixWeight.toString());
     }
 
     const child = spawn(options.pythonExe, ["-u", ...args]);
@@ -277,9 +376,9 @@ async function runSurgicalWhisper(
 
     child.on("close", (code) => {
       if (done) {
-        // Sentinel reached, success regardless of exit code (which will be null due to SIGKILL)
-      } else if (code !== 0) {
-        reject(new Error(`Surgical ASR process failed with code ${code}`));
+        // Sentinel reached, success
+      } else if (code !== 0 && code !== null) {
+        reject(new Error(`Surgical ASR process (${engine}) failed with code ${code}`));
         return;
       }
 
@@ -290,7 +389,9 @@ async function runSurgicalWhisper(
 
       try {
         const data = JSON.parse(fs.readFileSync(outputJson, "utf-8")) as TranscriptFile;
-        resolve(data.segments || []);
+        // Tag the segments with the engine used
+        const segments = (data.segments || []).map(s => ({ ...s, engine }));
+        resolve(segments);
       } catch (err) {
         reject(err);
       }

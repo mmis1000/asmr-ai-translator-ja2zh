@@ -9,7 +9,7 @@ import json
 # Ensure local imports work
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from engine import ASREngine
+from engine import ASREngine, MMSEngine
 
 # Sentinel printed after JSON is written — the Node.js parent detects this line
 # and kills us via child.kill("SIGKILL"), bypassing the CTranslate2+ROCm hang.
@@ -36,6 +36,11 @@ def main():
     parser.add_argument("--end", type=float, help="Clip end time in seconds")
     parser.add_argument("--temperature", type=float, help="Whisper temperature")
     parser.add_argument("--beam-size", type=int, default=5, help="Beam size")
+    parser.add_argument("--mix-audio", help="Optional original audio to mix back (for sterile stems)")
+    parser.add_argument("--mix-weight", type=float, default=0.07, help="Weight for mix-audio")
+    parser.add_argument("--engine", default="whisper", choices=["whisper", "mms", "qwen"], help="ASR engine: whisper, mms, or qwen")
+    parser.add_argument("--mms-lang", default="jpn", help="MMS target language")
+    parser.add_argument("--intervals", help="Pipe-separated start,end pairs (e.g. '1.0,2.0|5.0,8.0') for batch processing")
 
     args = parser.parse_args()
 
@@ -43,16 +48,50 @@ def main():
         print(f"Error: Audio file not found: {args.audio}", flush=True)
         sys.exit(1)
 
-    engine = ASREngine(model_size=args.model, device=args.device)
-    full_text, sentences, segments = engine.transcribe_file(
-        args.audio,
-        prompt=args.prompt,
-        clip_start=args.start,
-        clip_end=args.end,
-        temperature=args.temperature,
-        beam_size=args.beam_size,
-        condition_on_previous_text=True
-    )
+    if args.engine == "mms":
+        engine = MMSEngine(device=args.device)
+        
+        # Parse intervals if provided, else use start/end
+        intervals = []
+        if args.intervals:
+            for pair in args.intervals.split("|"):
+                if "," in pair:
+                    s, e = pair.split(",")
+                    intervals.append((float(s), float(e)))
+        elif args.start is not None and args.end is not None:
+            intervals.append((args.start, args.end))
+
+        full_text, sentences, segments = engine.transcribe_file(
+            args.audio,
+            lang=args.mms_lang,
+            intervals=intervals,
+            mix_audio_path=args.mix_audio,
+            mix_weight=args.mix_weight,
+        )
+    elif args.engine == "qwen":
+        from engine import QwenASREngine
+        engine = QwenASREngine(device=args.device)
+        full_text, sentences, segments = engine.transcribe_file(
+            args.audio,
+            prompt=args.prompt,
+            clip_start=args.start,
+            clip_end=args.end,
+            mix_audio_path=args.mix_audio,
+            mix_weight=args.mix_weight,
+        )
+    else:
+        engine = ASREngine(model_size=args.model, device=args.device)
+        full_text, sentences, segments = engine.transcribe_file(
+            args.audio,
+            prompt=args.prompt,
+            clip_start=args.start,
+            clip_end=args.end,
+            temperature=args.temperature,
+            beam_size=args.beam_size,
+            condition_on_previous_text=True,
+            mix_audio_path=args.mix_audio,
+            mix_weight=args.mix_weight,
+        )
 
     output_data = {
         "full_text": full_text,

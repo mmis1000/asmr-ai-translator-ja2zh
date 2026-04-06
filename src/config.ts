@@ -55,10 +55,12 @@ export interface TranslatorConfig {
   repairTemperature: number | null;
   repairBeamSize: number;
   repairWithVocal: boolean;
+  mixWeight: number;
   saveAudio: boolean;
-  asrPrompt: string;
   repairLargeV3: boolean;
   saveAudioStems: boolean;
+  useMmsRepair: boolean;
+  useQwenRepair: boolean;
 
   // Paths
   inputDir: string;
@@ -101,8 +103,10 @@ export const DEFAULT_CONFIG: Omit<TranslatorConfig,
   repairBeamSize: 10,
   saveAudio: false,
   repairWithVocal: false,
-  asrPrompt: "",
+  mixWeight: 0.07,
   repairLargeV3: false,
   saveAudioStems: false,
+  useMmsRepair: false,
+  useQwenRepair: false,
   debugLog:       false,
 };

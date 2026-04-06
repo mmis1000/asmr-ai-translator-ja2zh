@@ -18,6 +18,42 @@ const COLLAPSE_MIN_LEN = 5;
 /** Number of consecutive entries with identical text before declaring collapse. */
 const COLLAPSE_THRESHOLD = 3;
 
+/**
+ * CJK-only name (1–10 chars) followed by a full-width or half-width colon.
+ * Matches at the very start of a translated string.
+ * The ASR source never contains speaker labels, so any match is a hallucination.
+ */
+const SPEAKER_PREFIX_RE = /^([\u3040-\u9FFF\uF900-\uFAFF]{1,10}[：:])\s*/u;
+
+/**
+ * Strip spurious "Name：" prefixes from translated entries.
+ *
+ * The source ASR has no speaker labels, so a CJK-name colon at the start of
+ * any translated text is always a model hallucination. We collect every
+ * distinct prefix that appears at least once and strip it from all entries.
+ */
+function stripSpeakerPrefixes(entries: TranslationEntry[]): TranslationEntry[] {
+  const toStrip = new Set<string>();
+  for (const e of entries) {
+    if (e.text == null) continue;
+    const m = e.text.match(SPEAKER_PREFIX_RE);
+    if (m) toStrip.add(m[1]!);
+  }
+
+  if (toStrip.size === 0) return entries;
+
+  console.log(`  [translate] Stripping speaker prefixes: ${[...toStrip].join(", ")}`);
+
+  return entries.map(e => {
+    if (e.text == null) return e;
+    const m = e.text.match(SPEAKER_PREFIX_RE);
+    if (m && toStrip.has(m[1]!)) {
+      return { ...e, text: e.text.slice(m[0].length) };
+    }
+    return e;
+  });
+}
+
 /** Bump temperature by this amount on the first retry. */
 const TEMPERATURE_BUMP = 0.5;
 
@@ -306,5 +342,5 @@ export async function translateTrack(
     windowResults.push(winResult);
   }
 
-  return { entries: allEntries, windowResults };
+  return { entries: stripSpeakerPrefixes(allEntries), windowResults };
 }

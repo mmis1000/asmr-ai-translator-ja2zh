@@ -21,6 +21,7 @@ export interface TranscriptSegment {
     type: "missed" | "hallucinated" | "uncertain" | "repeated";
     reason: string;
   };
+  engine?: "whisper" | "mms" | "qwen";
 }
 
 export interface DemucsWindow {

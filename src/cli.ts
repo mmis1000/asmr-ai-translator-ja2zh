@@ -74,6 +74,8 @@ ASR:
   --min-hallucination <n>  Min text length to filter (default: 20)
   --repair-with-vocal      Use Demucs vocal stem for repair pass (forces --save-audio)
   --save-audio             Save separated audio stems for debugging
+  --mms-repair             Enable MMS ASR as a fallback during surgical repair
+  --qwen-repair            Enable Qwen-ASR as a fallback during surgical repair
 
 Note: --dlsite with LLM extraction requires --meta-model or --meta-server-url.
       Without these, --dlsite still scrapes DLSite for basic metadata (title, VA,
@@ -115,11 +117,14 @@ function parseCliArgs(): TranslatorConfig {
       "reject-negative-snr": { type: "boolean" },
       "repair-temp": { type: "string" },
       "repair-beam": { type: "string" },
+      "mix-weight": { type: "string" },
       "force-repair": { type: "boolean" },
       "force-asr": { type: "boolean" },
       "repair-with-vocal": { type: "boolean" },
       "save-audio": { type: "boolean" },
       "repair-large-v3": { type: "boolean" },
+      "mms-repair":      { type: "boolean" },
+      "qwen-repair":     { type: "boolean" },
       help:              { type: "boolean", short: "h" },
     },
     strict: true,
@@ -195,8 +200,11 @@ function parseCliArgs(): TranslatorConfig {
     repairTemperature: values["repair-temp"] ? parseFloat(values["repair-temp"]) : DEFAULT_CONFIG.repairTemperature,
     repairBeamSize: values["repair-beam"] ? parseInt(values["repair-beam"]) : DEFAULT_CONFIG.repairBeamSize,
     repairWithVocal:   values["repair-with-vocal"] ?? DEFAULT_CONFIG.repairWithVocal,
+    mixWeight:         values["mix-weight"] ? parseFloat(values["mix-weight"]) : DEFAULT_CONFIG.mixWeight,
     saveAudioStems:    (values["repair-with-vocal"] ?? DEFAULT_CONFIG.repairWithVocal) ? true : (values["save-audio"] ?? DEFAULT_CONFIG.saveAudioStems),
     repairLargeV3:     values["repair-large-v3"]   ?? DEFAULT_CONFIG.repairLargeV3,
+    useMmsRepair:      values["mms-repair"]        ?? DEFAULT_CONFIG.useMmsRepair,
+    useQwenRepair:     values["qwen-repair"]       ?? DEFAULT_CONFIG.useQwenRepair,
   };
 }
 
@@ -394,7 +402,7 @@ async function main() {
   const readyTracks: TrackWithTranscript[] = [];
   let skipped = 0;
 
-  const asrPrompt = "asr" in outputMetadata
+  const asrPrompt = ("asr" in outputMetadata)
     ? (outputMetadata as FinalMetadata).asr.prompt
     : undefined;
 
@@ -470,7 +478,10 @@ async function main() {
           repairTemperature: config.repairTemperature,
           repairBeamSize: config.repairBeamSize,
           repairWithVocal: config.repairWithVocal,
-          asrPrompt,
+          mixWeight: config.mixWeight,
+          asrPrompt: asrPrompt || undefined,
+          useMmsRepair: config.useMmsRepair,
+          useQwenRepair: config.useQwenRepair,
         },
         surgicalLog,
         vocalPath

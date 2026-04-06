@@ -295,6 +295,41 @@ function createMissedSegment(windows: DemucsWindow[]): TranscriptSegment {
   };
 }
 
+/**
+ * Merge consecutive segments that share the same start timestamp (after ms
+ * rounding). ASR hallucination loops can produce many segments at near-identical
+ * timestamps; without merging, the grammar emits multiple translation entries
+ * sharing the same LRC timestamp.
+ */
+function mergeSameStartSegments(segments: TranscriptSegment[]): TranscriptSegment[] {
+  if (segments.length === 0) return segments;
+
+  const result: TranscriptSegment[] = [];
+  let current: TranscriptSegment = { ...segments[0]!, words: [...segments[0]!.words] };
+
+  for (let i = 1; i < segments.length; i++) {
+    const seg = segments[i]!;
+    if (Math.round(current.start_time * 1000) === Math.round(seg.start_time * 1000)) {
+      current.text += seg.text;
+      current.end_time = Math.max(current.end_time, seg.end_time);
+      current.words = current.words.concat(seg.words);
+      // Keep worst-case quality metrics so downstream filters stay conservative
+      current.avg_logprob = Math.min(current.avg_logprob, seg.avg_logprob);
+      current.compression_ratio = Math.max(current.compression_ratio, seg.compression_ratio);
+      current.no_speech_prob = Math.max(current.no_speech_prob, seg.no_speech_prob);
+      if (seg.vocal_energy !== undefined)
+        current.vocal_energy = Math.max(current.vocal_energy ?? 0, seg.vocal_energy);
+      if (seg.snr !== undefined)
+        current.snr = Math.min(current.snr ?? Infinity, seg.snr);
+    } else {
+      result.push(current);
+      current = { ...seg, words: [...seg.words] };
+    }
+  }
+  result.push(current);
+  return result;
+}
+
 export function cleanTranscript(
   transcript: TranscriptFile,
   options: {
@@ -320,7 +355,7 @@ export function cleanTranscript(
   const cleaned = expanded.filter((s, i) => {
     const isRepeated = repeatedIndices.has(i);
     const garbled = isGarbled(s, options, false);
-    
+
     if (isRepeated) {
       s.mismatch = {
         type: "repeated",
@@ -334,18 +369,24 @@ export function cleanTranscript(
     if (s.mismatch) {
       mismatches.push({ ...s });
     }
-    
+
     return !garbled;
   });
 
+  // 2b. Merge consecutive segments that collapsed to the same start timestamp
+  //     after ms rounding (e.g. ASR hallucination loops producing many segments
+  //     at near-identical timestamps). Without this the grammar emits multiple
+  //     translation entries sharing the same LRC timestamp.
+  const deduped = mergeSameStartSegments(cleaned);
+
   // 3. Scenario C Detection (Missed Speech)
   if (transcript.demucs_windows) {
-    const missed = detectMissedSpeech(cleaned, transcript.demucs_windows, options.vocalThreshold, options.snrThreshold);
+    const missed = detectMissedSpeech(deduped, transcript.demucs_windows, options.vocalThreshold, options.snrThreshold);
     mismatches.push(...missed);
   }
 
   // 4. Identify Surgical Repair Ranges
-  const repairRanges = identifyRepairRanges(cleaned, mismatches, {
+  const repairRanges = identifyRepairRanges(deduped, mismatches, {
     vocalThreshold: options.vocalThreshold,
     minMissedDuration: 1.5, // Only repair meaningful chunks
   });
@@ -354,7 +395,7 @@ export function cleanTranscript(
   const sortedMismatches = [...mismatches].sort((a, b) => a.start_time - b.start_time);
 
   return {
-    segments: cleaned,
+    segments: deduped,
     mismatches: sortedMismatches,
     repairRanges,
   };

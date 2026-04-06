@@ -18,9 +18,13 @@ dependencies = [
     "rocm",
     # CTranslate2 ROCm (overrides CPU wheel pulled by faster-whisper)
     "ctranslate2",
+    "transformers",
+    "accelerate",
+    "qwen_asr",
 ]
 
 [tool.uv.sources]
+qwen_asr = { git = "https://github.com/QwenLM/Qwen3-ASR.git" }
 torch = { url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2/torch-2.9.1%2Brocmsdk20260116-cp312-cp312-win_amd64.whl" }
 torchaudio = { url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2/torchaudio-2.9.1%2Brocmsdk20260116-cp312-cp312-win_amd64.whl" }
 rocm-sdk-core = { url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2/rocm_sdk_core-7.2.0.dev0-py3-none-win_amd64.whl" }

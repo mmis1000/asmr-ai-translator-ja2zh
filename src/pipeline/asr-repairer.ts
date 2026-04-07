@@ -29,6 +29,7 @@ interface RepairOptions {
   useQwenRepair?: boolean;
   useSenseVoiceRepair?: boolean;
   useGemmaRepair?: boolean;
+  saveRepairAudio: boolean;
 }
 
 /**
@@ -124,26 +125,35 @@ export async function repairTranscription(
       }
 
       let newSegments: TranscriptSegment[] = [];
+      let repairAudioPath: string | undefined = undefined;
+
+      if (options.saveRepairAudio) {
+        const repairAudioDir = path.join(tempDir, "repair_audio_fragments");
+        if (!fs.existsSync(repairAudioDir)) fs.mkdirSync(repairAudioDir, { recursive: true });
+        
+        const stem = path.basename(audioPath, path.extname(audioPath));
+        repairAudioPath = path.join(repairAudioDir, `${stem}_repair_${range.start.toFixed(0)}.wav`);
+      }
 
       if (options.useQwenRepair) {
         console.log(`     - Using Qwen engine for repair (Full Switch)...`);
-        newSegments = await runSurgicalASR(inputAudio, range, repairFile, options, mixAudio, "qwen");
+        newSegments = await runSurgicalASR(inputAudio, range, repairFile, options, mixAudio, "qwen", repairAudioPath);
       } else if (options.useMmsRepair) {
         console.log(`     - Using MMS engine for repair (Full Switch)...`);
         const clusters = getSpeechClusters(windows, range, options.vocalThreshold, options.snrThreshold);
         console.log(`     - Batching ${clusters.length} speech cluster(s) for MMS engine.`);
         
         if (clusters.length > 0) {
-           newSegments = await runSurgicalASR(inputAudio, clusters, repairFile, options, mixAudio, "mms");
+           newSegments = await runSurgicalASR(inputAudio, clusters, repairFile, options, mixAudio, "mms", repairAudioPath);
         }
       } else if (options.useSenseVoiceRepair) {
         console.log(`     - Using SenseVoice engine for repair (Full Switch)...`);
-        newSegments = await runSurgicalASR(inputAudio, range, repairFile, options, mixAudio, "sensevoice");
+        newSegments = await runSurgicalASR(inputAudio, range, repairFile, options, mixAudio, "sensevoice", repairAudioPath);
       } else if (options.useGemmaRepair) {
         console.log(`     - Using Gemma engine for repair (Full Switch)...`);
-        newSegments = await runSurgicalASR(inputAudio, range, repairFile, options, mixAudio, "gemma");
+        newSegments = await runSurgicalASR(inputAudio, range, repairFile, options, mixAudio, "gemma", repairAudioPath);
       } else {
-        newSegments = await runSurgicalASR(inputAudio, range, repairFile, options, mixAudio, "whisper");
+        newSegments = await runSurgicalASR(inputAudio, range, repairFile, options, mixAudio, "whisper", repairAudioPath);
       }
       
       const repairEntry: SurgicalRepairEntry = {
@@ -355,10 +365,24 @@ async function runSurgicalASR(
   outputJson: string,
   options: RepairOptions,
   mixAudioPath: string | undefined,
-  engine: "whisper" | "mms" | "qwen" | "sensevoice" | "gemma"
+  engine: "whisper" | "mms" | "qwen" | "sensevoice" | "gemma",
+  repairAudioPath?: string
 ): Promise<TranscriptSegment[]> {
   return new Promise((resolve, reject) => {
     const asrScript = options.asrScript || DEFAULT_ASR_SCRIPT;
+
+    // Select the correct Python virtual environment
+    // Qwen requires Transformers 4.x, so it has its own isolated env.
+    let enginePythonExe = options.pythonExe;
+    if (engine === "qwen") {
+      const asrDir = path.dirname(asrScript);
+      const qwenVenvExe = path.join(asrDir, "qwen_env", ".venv", "Scripts", "python.exe");
+      if (fs.existsSync(qwenVenvExe)) {
+        enginePythonExe = qwenVenvExe;
+      } else {
+        console.warn(`  [ASR] Isolated Qwen environment not found at ${qwenVenvExe}. Falling back to default.`);
+      }
+    }
 
     const args = [
       asrScript,
@@ -368,6 +392,10 @@ async function runSurgicalASR(
       "--device", options.device,
       "--engine", engine,
     ];
+
+    if (repairAudioPath) {
+      args.push("--save-audio-slice", repairAudioPath);
+    }
 
     if ((engine === "whisper" || engine === "qwen" || engine === "sensevoice" || engine === "gemma") && !Array.isArray(range)) {
       args.push("--start", range.start.toFixed(3));
@@ -392,7 +420,7 @@ async function runSurgicalASR(
       args.push("--mix-weight", options.mixWeight.toString());
     }
 
-    const child = spawn(options.pythonExe, ["-u", ...args]);
+    const child = spawn(enginePythonExe, ["-u", ...args]);
     let output = "";
     let done = false;
 

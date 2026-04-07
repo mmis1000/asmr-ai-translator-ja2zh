@@ -43,13 +43,24 @@ if (-not (Test-Path $WheelDest)) {
   Remove-Item -Recurse -Force $ExtractPath
 }
 
-# 3. Sync dependencies
-Write-Host "Syncing dependencies..."
+# 3. Sync main dependencies
+Write-Host "Syncing main ASR dependencies (Transformers 5.x)..."
 uv sync
 if ($LASTEXITCODE -ne 0) {
-  Write-Error "uv sync failed."
+  Write-Error "Main uv sync failed."
   exit $LASTEXITCODE
 }
+
+# 4. Sync Qwen dependencies (Transformers 4.57.6)
+Write-Host "`nSyncing isolated Qwen ASR dependencies..."
+Push-Location qwen_env
+uv sync
+if ($LASTEXITCODE -ne 0) {
+  Write-Error "Qwen uv sync failed."
+  Pop-Location
+  exit $LASTEXITCODE
+}
+Pop-Location
 
 # 4. Verification
 Write-Host "`nVerifying installation..."

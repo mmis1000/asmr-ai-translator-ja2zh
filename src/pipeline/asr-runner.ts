@@ -169,8 +169,23 @@ export async function getTranscription(
       "--output", asrPath,
     ];
 
+    // Select the correct Python virtual environment
+    // Qwen requires Transformers 4.x, so it has its own isolated env.
+    // Others (Gemma, Whisper, SenseVoice) use the main env (Transformers 5.x).
+    let enginePythonExe = options.pythonExe;
+    if (options.asrEngine === "qwen") {
+      const asrDir = path.dirname(asrScript);
+      const qwenVenvExe = path.join(asrDir, "qwen_env", ".venv", "Scripts", "python.exe");
+      try {
+        await fs.access(qwenVenvExe);
+        enginePythonExe = qwenVenvExe;
+      } catch {
+        console.warn(`  [ASR] Isolated Qwen environment not found at ${qwenVenvExe}. Falling back to default.`);
+      }
+    }
+
     await runPythonCommand(
-      options.pythonExe,
+      enginePythonExe,
       asrScript,
       asrArgs,
       "[ASR_DONE]",

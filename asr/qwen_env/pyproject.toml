@@ -1,35 +1,25 @@
 [project]
-name = "translator-asr"
+name = "translator-asr-qwen"
 version = "0.1.0"
 requires-python = "==3.12.*"
 dependencies = [
-    "faster-whisper",
-    "demucs",
-    "librosa",
-    "numpy",
-    "scipy",
-    "soundfile",
-    # ROCm PyTorch (Windows)
+    "qwen_asr",
+    "transformers==4.57.6",
     "torch",
     "torchaudio",
-    "torchvision",
-    # ROCm SDK
     "rocm-sdk-core",
     "rocm-sdk-libraries-custom",
     "rocm",
-    # CTranslate2 ROCm (overrides CPU wheel pulled by faster-whisper)
-    "ctranslate2",
-    "transformers>=5.5.0",
-    "accelerate",
-    "funasr",
-    "modelscope",
+    "faster-whisper",
+    "librosa",
+    "soundfile",
+    "scipy",
 ]
 
 [tool.uv.sources]
+qwen_asr = { git = "https://github.com/QwenLM/Qwen3-ASR.git" }
 torch = { url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2/torch-2.9.1%2Brocmsdk20260116-cp312-cp312-win_amd64.whl" }
 torchaudio = { url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2/torchaudio-2.9.1%2Brocmsdk20260116-cp312-cp312-win_amd64.whl" }
-torchvision = { url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2/torchvision-0.24.1%2Brocmsdk20260116-cp312-cp312-win_amd64.whl" }
 rocm-sdk-core = { url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2/rocm_sdk_core-7.2.0.dev0-py3-none-win_amd64.whl" }
 rocm-sdk-libraries-custom = { url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2/rocm_sdk_libraries_custom-7.2.0.dev0-py3-none-win_amd64.whl" }
 rocm = { url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2/rocm-7.2.0.dev0.tar.gz" }
-ctranslate2 = { path = "rocm_wheels/ctranslate2-4.7.1-cp312-cp312-win_amd64.whl" }

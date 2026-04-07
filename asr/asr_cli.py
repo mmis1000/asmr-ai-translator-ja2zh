@@ -41,6 +41,7 @@ def main():
     parser.add_argument("--engine", default="whisper", choices=["whisper", "mms", "qwen", "sensevoice", "gemma"], help="ASR engine: whisper, mms, qwen, sensevoice, or gemma")
     parser.add_argument("--mms-lang", default="jpn", help="MMS target language")
     parser.add_argument("--intervals", help="Pipe-separated start,end pairs (e.g. '1.0,2.0|5.0,8.0') for batch processing")
+    parser.add_argument("--save-audio-slice", help="Save the exact audio slice (with mixing) used for processing to this path (.wav)")
 
     args = parser.parse_args()
 
@@ -67,6 +68,7 @@ def main():
             intervals=intervals,
             mix_audio_path=args.mix_audio,
             mix_weight=args.mix_weight,
+            save_audio_slice_path=args.save_audio_slice,
         )
     elif args.engine == "qwen":
         engine = QwenASREngine(device=args.device)
@@ -77,6 +79,7 @@ def main():
             clip_end=args.end,
             mix_audio_path=args.mix_audio,
             mix_weight=args.mix_weight,
+            save_audio_slice_path=args.save_audio_slice,
         )
     elif args.engine == "sensevoice":
         engine = SenseVoiceEngine(device=args.device)
@@ -87,6 +90,7 @@ def main():
             clip_end=args.end,
             mix_audio_path=args.mix_audio,
             mix_weight=args.mix_weight,
+            save_audio_slice_path=args.save_audio_slice,
         )
     elif args.engine == "gemma":
         engine = GemmaASREngine(device=args.device)
@@ -97,6 +101,7 @@ def main():
             clip_end=args.end,
             mix_audio_path=args.mix_audio,
             mix_weight=args.mix_weight,
+            save_audio_slice_path=args.save_audio_slice,
         )
     else:
         engine = ASREngine(model_size=args.model, device=args.device)
@@ -110,6 +115,7 @@ def main():
             condition_on_previous_text=True,
             mix_audio_path=args.mix_audio,
             mix_weight=args.mix_weight,
+            save_audio_slice_path=args.save_audio_slice,
         )
 
     output_data = {

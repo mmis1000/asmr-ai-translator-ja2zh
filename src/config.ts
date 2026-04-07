@@ -64,6 +64,7 @@ export interface TranslatorConfig {
   useQwenRepair: boolean;
   useSenseVoiceRepair: boolean;
   useGemmaRepair: boolean;
+  saveRepairAudio: boolean;
 
   // Paths
   inputDir: string;
@@ -114,5 +115,6 @@ export const DEFAULT_CONFIG: Omit<TranslatorConfig,
   useQwenRepair: false,
   useSenseVoiceRepair: false,
   useGemmaRepair: false,
+  saveRepairAudio: false,
   debugLog:       false,
 };

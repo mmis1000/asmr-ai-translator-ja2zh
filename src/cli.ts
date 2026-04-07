@@ -79,6 +79,7 @@ ASR:
   --sensevoice-repair      Enable SenseVoice-ASR as a fallback during surgical repair
   --gemma-repair           Enable Gemma-ASR as a fallback during surgical repair
   --asr-engine <engine>    ASR engine to use: whisper, mms, qwen, sensevoice, gemma (default: whisper)
+  --save-repair-audio      Save audio fragments used for surgical repairs to a dedicated directory
 
 Note: --dlsite with LLM extraction requires --meta-model or --meta-server-url.
       Without these, --dlsite still scrapes DLSite for basic metadata (title, VA,
@@ -131,6 +132,7 @@ function parseCliArgs(): TranslatorConfig {
       "sensevoice-repair": { type: "boolean" },
       "gemma-repair":      { type: "boolean" },
       "asr-engine":      { type: "string" },
+      "save-repair-audio": { type: "boolean" },
       help:              { type: "boolean", short: "h" },
     },
     strict: true,
@@ -219,6 +221,7 @@ function parseCliArgs(): TranslatorConfig {
     useSenseVoiceRepair: (values["sensevoice-repair"] as boolean) ?? DEFAULT_CONFIG.useSenseVoiceRepair,
     useGemmaRepair:      (values["gemma-repair"] as boolean)      ?? DEFAULT_CONFIG.useGemmaRepair,
     asrEngine:         asrEngine                   ?? DEFAULT_CONFIG.asrEngine,
+    saveRepairAudio:   (values["save-repair-audio"] as boolean) ?? DEFAULT_CONFIG.saveRepairAudio,
   };
 }
 
@@ -511,6 +514,7 @@ async function main() {
           useQwenRepair: config.useQwenRepair,
           useSenseVoiceRepair: config.useSenseVoiceRepair,
           useGemmaRepair: config.useGemmaRepair,
+          saveRepairAudio: config.saveRepairAudio,
         },
         surgicalLog,
         vocalPath

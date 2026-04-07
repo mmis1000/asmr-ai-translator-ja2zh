@@ -2,14 +2,13 @@ import os
 import re
 import difflib
 import time
-from faster_whisper import WhisperModel
-import torch
-import librosa
-from transformers import Wav2Vec2ForCTC, AutoProcessor
+import json
 
 
 class ASREngine:
     def __init__(self, model_size="large-v3-turbo", device="cuda"):
+        from faster_whisper import WhisperModel
+        import torch
         try:
             print(f"Loading WhisperModel '{model_size}' onto {device} (bfloat16)...", flush=True)
             self.model = WhisperModel(model_size, device=device, compute_type="bfloat16")
@@ -31,6 +30,7 @@ class ASREngine:
         condition_on_previous_text=True,
         mix_audio_path=None,
         mix_weight=0.07,
+        save_audio_slice_path=None,
     ):
         print(f"Processing audio: {os.path.basename(audio_path)}", flush=True)
 
@@ -62,11 +62,10 @@ class ASREngine:
             if duration is not None:
                 cmd += ["-t", str(duration)]
             
-            if mix_audio_path:
                 # Mix them: [0:a] is main, [1:a] is mix. 
                 # weights=1 <weight> means main stays at full volume, 
                 # and original is added at <weight> level.
-                cmd += ["-filter_complex", f"[0:a][1:a]amix=inputs=2:weights=1 {mix_weight}:dropout_transition=0"]
+                cmd += ["-filter_complex", f"[0:a][1:a]amix=inputs=2:weights=1 {mix_weight}:dropout_transition=0:duration=shortest"]
             
             cmd += ["-c:a", "pcm_s16le", tmp_clip]
             
@@ -78,6 +77,13 @@ class ASREngine:
             target_audio = tmp_clip
             offset = start
 
+        if save_audio_slice_path and target_audio:
+            import shutil
+            os.makedirs(os.path.dirname(os.path.abspath(save_audio_slice_path)), exist_ok=True)
+            shutil.copy2(target_audio, save_audio_slice_path)
+            print(f"  -> Saved audio slice to: {save_audio_slice_path}", flush=True)
+
+        import librosa
         try:
             kwargs = {
                 "beam_size": beam_size,
@@ -165,10 +171,12 @@ class ASREngine:
 
 class MMSEngine:
     def __init__(self, model_id="facebook/mms-1b-all", device="cuda"):
+        from transformers import Wav2Vec2ForCTC, AutoProcessor
+        import torch
         self.device = device
         self.model_id = model_id
         try:
-            print(f"Loading '{model_id}' onto {device}...", flush=True)
+            print(f"Loading MMS Model '{model_id}' onto {device}...", flush=True)
             self.processor = AutoProcessor.from_pretrained(model_id)
             self.model = Wav2Vec2ForCTC.from_pretrained(model_id).to(device)
             self.current_lang = None
@@ -186,7 +194,9 @@ class MMSEngine:
         intervals=None, # List of (start, end)
         mix_audio_path=None,
         mix_weight=0.07,
+        save_audio_slice_path=None,
     ):
+        import torch
         if not intervals:
             return "", [], []
 
@@ -205,6 +215,12 @@ class MMSEngine:
         all_segments = []
         full_texts = []
         
+        if save_audio_slice_path:
+            # For MMS, since it processes in clusters, we just save the first one or a combined one if possible.
+            # But the user usually wants to see a representative fragment.
+            # Let's save a placeholder or the first cluster for now to confirm it's working.
+            print(f"  -> [INFO] MMS save_audio_slice_path requested. Saving first cluster to {save_audio_slice_path}", flush=True)
+
         import subprocess
 
         for i, (start, end) in enumerate(intervals):
@@ -220,7 +236,7 @@ class MMSEngine:
                     # Complex filter to slice both and mix
                     filter_complex = f"[0:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[vox];"
                     filter_complex += f"[1:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[orig];"
-                    filter_complex += f"[vox][orig]amix=inputs=2:weights=1 {mix_weight}:dropout_transition=0"
+                    filter_complex += f"[vox][orig]amix=inputs=2:weights=1 {mix_weight}:dropout_transition=0:duration=shortest"
                     
                     cmd = [
                         "ffmpeg", "-y", "-i", audio_path, "-i", mix_audio_path,
@@ -235,7 +251,15 @@ class MMSEngine:
                 
                 subprocess.run(cmd, check=True, capture_output=True)
                 
+                # Diagnostic save: Copy first cluster if requested
+                if i == 0 and save_audio_slice_path:
+                    import shutil
+                    os.makedirs(os.path.dirname(os.path.abspath(save_audio_slice_path)), exist_ok=True)
+                    shutil.copy2(tmp_wav, save_audio_slice_path)
+                    print(f"  -> Saved MMS diagnostic cluster to: {save_audio_slice_path}", flush=True)
+
                 # Load the sliced cluster
+                import librosa
                 audio, _ = librosa.load(tmp_wav, sr=16000)
                 os.remove(tmp_wav)
 
@@ -274,10 +298,11 @@ class MMSEngine:
 
 class QwenASREngine:
     def __init__(self, device="cuda"):
+        import torch
+        from qwen_asr import Qwen3ASRModel
         self.device = device
         self.MAX_SEGMENT_SECONDS = 60.0
         try:
-            from qwen_asr import Qwen3ASRModel
             print(f"Loading Qwen3-ASR (1.7B) + Forced Aligner (0.6B) onto {device}...", flush=True)
             self.model = Qwen3ASRModel.from_pretrained(
                 "Qwen/Qwen3-ASR-1.7B",
@@ -327,7 +352,10 @@ class QwenASREngine:
         clip_end=None,
         mix_audio_path=None,
         mix_weight=0.07,
+        save_audio_slice_path=None,
     ):
+        import torch
+        import librosa
         from qwen_asr.inference.utils import normalize_audio_input, split_audio_into_chunks, SAMPLE_RATE
         
         print(f"Processing audio (Qwen): {os.path.basename(audio_path)}", flush=True)
@@ -353,7 +381,7 @@ class QwenASREngine:
             if duration is not None:
                 cmd += ["-t", str(duration)]
             if mix_audio_path:
-                cmd += ["-filter_complex", f"[0:a][1:a]amix=inputs=2:weights=1 {mix_weight}:dropout_transition=0"]
+                cmd += ["-filter_complex", f"[0:a][1:a]amix=inputs=2:weights=1 {mix_weight}:dropout_transition=0:duration=shortest"]
             
             cmd += ["-c:a", "pcm_s16le", tmp_clip]
             import subprocess
@@ -361,6 +389,12 @@ class QwenASREngine:
             
             target_audio = tmp_clip
             offset = start
+        
+        if save_audio_slice_path and target_audio:
+            import shutil
+            os.makedirs(os.path.dirname(os.path.abspath(save_audio_slice_path)), exist_ok=True)
+            shutil.copy2(target_audio, save_audio_slice_path)
+            print(f"  -> Saved audio slice to: {save_audio_slice_path}", flush=True)
         
         # Audio length for safety
         try:
@@ -596,7 +630,10 @@ class SenseVoiceEngine:
         clip_end=None,
         mix_audio_path=None,
         mix_weight=0.07,
+        save_audio_slice_path=None,
     ):
+        import torch
+        import librosa
         from funasr.utils.postprocess_utils import rich_transcription_postprocess
         
         print(f"Processing audio (SenseVoice): {os.path.basename(audio_path)}", flush=True)
@@ -622,7 +659,7 @@ class SenseVoiceEngine:
             if duration is not None:
                 cmd += ["-t", str(duration)]
             if mix_audio_path:
-                cmd += ["-filter_complex", f"[0:a][1:a]amix=inputs=2:weights=1 {mix_weight}:dropout_transition=0"]
+                cmd += ["-filter_complex", f"[0:a][1:a]amix=inputs=2:weights=1 {mix_weight}:dropout_transition=0:duration=shortest"]
             
             cmd += ["-c:a", "pcm_s16le", "-ar", "16000", tmp_clip] # SenseVoice prefers 16kHz
             import subprocess
@@ -630,6 +667,12 @@ class SenseVoiceEngine:
             
             target_audio = tmp_clip
             offset = start
+
+        if save_audio_slice_path and target_audio:
+            import shutil
+            os.makedirs(os.path.dirname(os.path.abspath(save_audio_slice_path)), exist_ok=True)
+            shutil.copy2(target_audio, save_audio_slice_path)
+            print(f"  -> Saved audio slice to: {save_audio_slice_path}", flush=True)
 
         try:
             # SenseVoice supports "auto", "zh", "en", "yue", "ja", "ko", "nospeech"
@@ -748,12 +791,13 @@ class GemmaASREngine:
         clip_end=None,
         mix_audio_path=None,
         mix_weight=0.07,
+        save_audio_slice_path=None,
     ):
         import torch
         import librosa
-        import json
-        import re
-
+        import transformers 
+        from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
+        
         print(f"Processing audio (Gemma-4): {os.path.basename(audio_path)}", flush=True)
         
         # 1. Load and resample audio (Gemma multimodal expects 16kHz)
@@ -795,6 +839,19 @@ class GemmaASREngine:
             
         audio_to_process = audio[start_sample:end_sample]
         global_offset_ms = int(start_sample / 16 * 1000) # relative to global start
+
+        if save_audio_slice_path:
+            import tempfile
+            import soundfile as sf
+            # Since we have the resampled/mixed/sliced audio in memory, we save it directly
+            fd, tmp_save = tempfile.mkstemp(suffix=".wav")
+            os.close(fd)
+            sf.write(tmp_save, audio_to_process, 16000)
+            import shutil
+            os.makedirs(os.path.dirname(os.path.abspath(save_audio_slice_path)), exist_ok=True)
+            shutil.copy2(tmp_save, save_audio_slice_path)
+            os.remove(tmp_save)
+            print(f"  -> Saved Gemma audio fragment to: {save_audio_slice_path}", flush=True)
 
         for i, start_idx in enumerate(range(0, len(audio_to_process), STRIDE)):
             end_idx = min(start_idx + CHUNK_SIZE, len(audio_to_process))
@@ -848,24 +905,45 @@ class GemmaASREngine:
             
             # Extract JSON from response
             try:
-                # Find the JSON array
+                # Find the JSON array (most likely)
                 match = re.search(r"\[\s*\{.*\}\s*\]", response, re.DOTALL)
+                chunk_segments = []
                 if match:
-                    chunk_segments = json.loads(match.group(0))
-                    if isinstance(chunk_segments, list):
-                        for seg in chunk_segments:
-                            all_segments.append({
-                                "text": seg.get("text", "").strip(),
-                                "start_time": seg.get("start", 0) / 1000.0,
-                                "end_time": seg.get("end", 0) / 1000.0,
-                                "words": [],
-                                "avg_logprob": 0.0,
-                                "compression_ratio": 0.0,
-                                "no_speech_prob": 0.0,
-                                "engine": "gemma"
-                            })
-                        if all_segments:
-                            prev_tail = f'"{all_segments[-1]["text"]}"'
+                    json_str = match.group(0)
+                    try:
+                        chunk_segments = json.loads(json_str)
+                    except json.JSONDecodeError:
+                        # Try to handle trailing commas or other common issues
+                        # Simplistic fix: remove trailing comma before ]
+                        json_str_fixed = re.sub(r",\s*\]", "]", json_str)
+                        try:
+                            chunk_segments = json.loads(json_str_fixed)
+                        except:
+                            # Final fallback: find all {...} objects
+                            objects = re.findall(r"\{[^{}]*\}", json_str)
+                            for obj in objects:
+                                try:
+                                    chunk_segments.append(json.loads(obj))
+                                except:
+                                    pass
+                
+                if chunk_segments and isinstance(chunk_segments, list):
+                    for seg in chunk_segments:
+                        text = seg.get("text", "").strip()
+                        if not text: continue
+                        
+                        all_segments.append({
+                            "text": text,
+                            "start_time": seg.get("start", 0) / 1000.0,
+                            "end_time": seg.get("end", 0) / 1000.0,
+                            "words": [],
+                            "avg_logprob": 0.0,
+                            "compression_ratio": 0.0,
+                            "no_speech_prob": 0.0,
+                            "engine": "gemma"
+                        })
+                    if all_segments:
+                        prev_tail = f'"{all_segments[-1]["text"]}"'
                 else:
                     print(f"Warning: No valid JSON segments found in chunk {i}. Content: {response[:100]}...", flush=True)
                     prev_tail = "null"

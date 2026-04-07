@@ -85,7 +85,19 @@ export function isGarbled(
   // Whisper Quality Metrics (Standard Flags)
   const whisperRejected = seg.no_speech_prob > 0.8 || seg.avg_logprob < -1.5 || seg.compression_ratio > 2.5;
 
+  // Hard reject: high compression_ratio means Whisper looped on repetitive output
+  // (e.g. echo/reverb artifacts). This is unambiguously a hallucination — Demucs
+  // signal presence is irrelevant and must NOT override this check.
+  if (seg.compression_ratio > 2.5) {
+    seg.mismatch = {
+      type: "hallucinated",
+      reason: `Repetitive ASR loop detected (compression_ratio: ${seg.compression_ratio.toFixed(2)})`,
+    };
+    return true;
+  }
+
   // 1. Scenario A: Whisper thinks it's non-speech/garbage, but signal IS high
+  // (Only reaches here when rejected by no_speech_prob or avg_logprob, not CR)
   if (whisperRejected && signalOk) {
     seg.mismatch = {
       type: "uncertain",

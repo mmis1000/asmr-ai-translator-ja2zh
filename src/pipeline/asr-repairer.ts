@@ -147,13 +147,19 @@ export async function repairTranscription(
 
       if (newSegments.length > 0) {
         repairEntry.newSegments = newSegments;
-        
-        // Remove old segments that fall within or overlap significantly with this range
-        currentSegments = currentSegments.filter(s => 
-          s.end_time <= range.start || s.start_time >= range.end
+
+        // Only remove BAD (mismatch) segments in this range. Good segments
+        // within the padded region are preserved — the 2s padding is for ASR
+        // context only, not a replacement zone. Removing all segments caused
+        // repair fragments landing in the padding to silently drop valid content.
+        const goodInRange = currentSegments.filter(s =>
+          !(s.end_time <= range.start || s.start_time >= range.end) && !s.mismatch
         );
-        // Also remove from mismatches in this range
-        currentMismatches = currentMismatches.filter(m => 
+        currentSegments = currentSegments.filter(s =>
+          (s.end_time <= range.start || s.start_time >= range.end) || !s.mismatch
+        );
+        // Remove mismatch entries in this range
+        currentMismatches = currentMismatches.filter(m =>
           m.end_time <= range.start || m.start_time >= range.end
         );
 
@@ -172,7 +178,14 @@ export async function repairTranscription(
           }, true);
 
           if (!garbled) {
-            passed.push(s);
+            // Only insert repair segments that don't conflict with good originals
+            // that were kept from the padding zone.
+            const conflictsWithGood = goodInRange.some(g =>
+              g.start_time < s.end_time && g.end_time > s.start_time
+            );
+            if (!conflictsWithGood) {
+              passed.push(s);
+            }
           } else if (s.mismatch) {
             currentMismatches.push(s);
           }
@@ -184,7 +197,7 @@ export async function repairTranscription(
           console.log(`     Repair successful: ${passed.length} new valid segments added.`);
         } else {
           repairEntry.status = "failed";
-          console.log(`     Repair produced no valid content (filtered by Demucs).`);
+          console.log(`     Repair produced no non-conflicting valid content.`);
         }
       } else {
         console.log(`     Repair produced no new content.`);
@@ -228,19 +241,27 @@ export function applySurgicalRepair(
 
     const range = entry.range;
 
-    // Remove original segments in this range
-    currentSegments = currentSegments.filter(s => 
-      s.end_time <= range.start || s.start_time >= range.end
+    // Mirror the live repair logic: only remove BAD (mismatch) segments.
+    // Good segments in the padded zone must be preserved.
+    const goodInRange = currentSegments.filter(s =>
+      !(s.end_time <= range.start || s.start_time >= range.end) && !s.mismatch
     );
-    currentMismatches = currentMismatches.filter(m => 
+    currentSegments = currentSegments.filter(s =>
+      (s.end_time <= range.start || s.start_time >= range.end) || !s.mismatch
+    );
+    currentMismatches = currentMismatches.filter(m =>
       m.end_time <= range.start || m.start_time >= range.end
     );
 
-    // Add back the repaired ones
-    currentSegments.push(...entry.newSegments);
-    
-    // Note: Mismatches in the repairs themselves are handled during the initial LOG generation,
-    // so we assume entry.newSegments are already the "cleaned" products.
+    // Only insert repair segments that don't conflict with kept good segments.
+    for (const s of entry.newSegments) {
+      const conflictsWithGood = goodInRange.some(g =>
+        g.start_time < s.end_time && g.end_time > s.start_time
+      );
+      if (!conflictsWithGood) {
+        currentSegments.push(s);
+      }
+    }
   }
 
   // Final sort

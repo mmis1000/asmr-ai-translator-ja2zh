@@ -443,8 +443,10 @@ async function main() {
       mismatches = merged.mismatches;
     }
 
-    // 2. Re-detect any REMAINING issues (that might need a new repair)
-    const { repairRanges: finalRepairRanges } = cleanTranscript({ ...transcript, segments: cleaned }, {
+    // 2. Re-detect missed speech on the post-repair segments (gaps may have changed).
+    //    The first-pass repairRanges already cover repetition loops and uncertain
+    //    segments; this second pass only adds newly visible missed-speech windows.
+    const { repairRanges: postRepairRanges } = cleanTranscript({ ...transcript, segments: cleaned }, {
       vocalThreshold: config.vocalEnergyThreshold,
       vocalSilenceThreshold: config.vocalSilenceThreshold,
       snrThreshold: config.snrThreshold,
@@ -453,6 +455,16 @@ async function main() {
       resplitGapSec: config.resplitGapSec,
       maxRepetitions: config.maxRepetitions,
     });
+
+    // Merge: first-pass ranges (repetition/uncertain/missed) + any new missed-speech
+    // ranges uncovered after cached repairs were applied. repairTranscription will
+    // skip ranges already present in the surgical log, so duplicates are harmless.
+    const rangeKey = (r: { start: number; end: number }) => `${r.start.toFixed(1)}-${r.end.toFixed(1)}`;
+    const seenKeys = new Set(repairRanges.map(rangeKey));
+    const finalRepairRanges = [...repairRanges];
+    for (const r of postRepairRanges) {
+      if (!seenKeys.has(rangeKey(r))) finalRepairRanges.push(r);
+    }
 
     let surgicalLog: any[] = cachedLog || [];
 

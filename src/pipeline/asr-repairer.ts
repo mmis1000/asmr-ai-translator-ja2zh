@@ -27,6 +27,8 @@ interface RepairOptions {
   asrPrompt?: string | undefined;
   useMmsRepair?: boolean;
   useQwenRepair?: boolean;
+  useSenseVoiceRepair?: boolean;
+  useGemmaRepair?: boolean;
 }
 
 /**
@@ -134,6 +136,12 @@ export async function repairTranscription(
         if (clusters.length > 0) {
            newSegments = await runSurgicalASR(inputAudio, clusters, repairFile, options, mixAudio, "mms");
         }
+      } else if (options.useSenseVoiceRepair) {
+        console.log(`     - Using SenseVoice engine for repair (Full Switch)...`);
+        newSegments = await runSurgicalASR(inputAudio, range, repairFile, options, mixAudio, "sensevoice");
+      } else if (options.useGemmaRepair) {
+        console.log(`     - Using Gemma engine for repair (Full Switch)...`);
+        newSegments = await runSurgicalASR(inputAudio, range, repairFile, options, mixAudio, "gemma");
       } else {
         newSegments = await runSurgicalASR(inputAudio, range, repairFile, options, mixAudio, "whisper");
       }
@@ -347,7 +355,7 @@ async function runSurgicalASR(
   outputJson: string,
   options: RepairOptions,
   mixAudioPath: string | undefined,
-  engine: "whisper" | "mms" | "qwen"
+  engine: "whisper" | "mms" | "qwen" | "sensevoice" | "gemma"
 ): Promise<TranscriptSegment[]> {
   return new Promise((resolve, reject) => {
     const asrScript = options.asrScript || DEFAULT_ASR_SCRIPT;
@@ -361,7 +369,7 @@ async function runSurgicalASR(
       "--engine", engine,
     ];
 
-    if ((engine === "whisper" || engine === "qwen") && !Array.isArray(range)) {
+    if ((engine === "whisper" || engine === "qwen" || engine === "sensevoice" || engine === "gemma") && !Array.isArray(range)) {
       args.push("--start", range.start.toFixed(3));
       args.push("--end", range.end.toFixed(3));
       if (engine === "whisper") {

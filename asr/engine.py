@@ -566,3 +566,315 @@ class QwenASREngine:
             if "char_end" in s: del s["char_end"]
             
         return sentences
+
+
+class SenseVoiceEngine:
+    def __init__(self, device="cuda"):
+        self.device = device
+        try:
+            from funasr import AutoModel
+            print(f"Loading SenseVoiceSmall onto {device}...", flush=True)
+            self.model = AutoModel(
+                model="iic/SenseVoiceSmall",
+                vad_model="fsmn-vad",
+                vad_kwargs={"max_single_segment_time": 30000},
+                device=device,
+                hub="ms", # ModelScope
+            )
+            print("SenseVoiceSmall Model loaded.", flush=True)
+        except Exception:
+            import traceback
+            print("CRITICAL: Failed to load SenseVoiceSmall", flush=True)
+            print(traceback.format_exc(), flush=True)
+            raise
+
+    def transcribe_file(
+        self,
+        audio_path,
+        prompt="",
+        clip_start=None,
+        clip_end=None,
+        mix_audio_path=None,
+        mix_weight=0.07,
+    ):
+        from funasr.utils.postprocess_utils import rich_transcription_postprocess
+        
+        print(f"Processing audio (SenseVoice): {os.path.basename(audio_path)}", flush=True)
+        
+        target_audio = audio_path
+        tmp_clip = None
+        offset = 0.0
+
+        if clip_start is not None or clip_end is not None or mix_audio_path is not None:
+            start = float(clip_start or 0.0)
+            duration = None
+            if clip_end is not None:
+                duration = float(clip_end) - start
+            
+            import tempfile
+            fd, tmp_clip = tempfile.mkstemp(suffix=".processed.wav")
+            os.close(fd)
+            
+            cmd = ["ffmpeg", "-y"]
+            cmd += ["-ss", str(start), "-i", audio_path]
+            if mix_audio_path:
+                cmd += ["-ss", str(start), "-i", mix_audio_path]
+            if duration is not None:
+                cmd += ["-t", str(duration)]
+            if mix_audio_path:
+                cmd += ["-filter_complex", f"[0:a][1:a]amix=inputs=2:weights=1 {mix_weight}:dropout_transition=0"]
+            
+            cmd += ["-c:a", "pcm_s16le", "-ar", "16000", tmp_clip] # SenseVoice prefers 16kHz
+            import subprocess
+            subprocess.run(cmd, capture_output=True, check=True)
+            
+            target_audio = tmp_clip
+            offset = start
+
+        try:
+            # SenseVoice supports "auto", "zh", "en", "yue", "ja", "ko", "nospeech"
+            res = self.model.generate(
+                input=target_audio,
+                cache={},
+                language="auto", 
+                use_itn=True,
+                batch_size_s=60,
+                merge_vad=True,
+            )
+
+            if not res or len(res) == 0:
+                return "", [], []
+
+            # SenseVoice returns result in segments if VAD is used
+            # The 'text' usually contains everything including events like <|laughter|>
+            raw_text = res[0]["text"]
+            clean_text = rich_transcription_postprocess(raw_text)
+            
+            # SenseVoice doesn't give precise per-sentence timestamps in the same way Whisper does
+            # if VAD is merged. If merge_vad=False, we get segments.
+            # Let's try to get segments by re-running if needed or parsing the result.
+            # Actually, funasr AutoModel with fsmn-vad returns a list of segments if we don't merge them.
+            
+            # For now, let's assume we want segments for the pipeline.
+            # re-run with merge_vad=False to get timestamps
+            res_segments = self.model.generate(
+                input=target_audio,
+                cache={},
+                language="auto",
+                use_itn=True,
+                batch_size_s=60,
+                merge_vad=False,
+            )
+
+            all_segments = []
+            texts = []
+            
+            for i, seg in enumerate(res_segments):
+                seg_text = rich_transcription_postprocess(seg["text"])
+                if not seg_text.strip():
+                    continue
+                
+                # funasr timestamps are in ms
+                ts = seg.get("timestamp") # [[start_ms, end_ms], ...] or [start_ms, end_ms]
+                if ts and isinstance(ts, list):
+                    # sometimes it's [[s, e]]
+                    if isinstance(ts[0], list):
+                        s_ms, e_ms = ts[0]
+                    else:
+                        s_ms, e_ms = ts
+                    
+                    s_sec = s_ms / 1000.0 + offset
+                    e_sec = e_ms / 1000.0 + offset
+                else:
+                    # Fallback if no timestamps
+                    s_sec = offset
+                    e_sec = offset + 1.0 # dummy
+
+                texts.append(seg_text)
+                all_segments.append({
+                    "text": seg_text.strip(),
+                    "start_time": round(s_sec, 3),
+                    "end_time": round(e_sec, 3),
+                    "words": [],
+                    "avg_logprob": 0.0,
+                    "compression_ratio": 0.0,
+                    "no_speech_prob": 0.0,
+                    "engine": "sensevoice"
+                })
+
+            full_text = "".join(texts)
+            sentences = [{"text": s["text"], "start_time": s["start_time"], "end_time": s["end_time"]} for s in all_segments]
+
+            return full_text, sentences, all_segments
+
+        except Exception:
+            import traceback
+            print("SenseVoice ASR Engine Crash Traceback:", flush=True)
+            print(traceback.format_exc(), flush=True)
+            return "", [], []
+        finally:
+            if tmp_clip and os.path.exists(tmp_clip):
+                try: os.remove(tmp_clip)
+                except: pass
+
+class GemmaASREngine:
+    def __init__(self, model_id="google/gemma-4-E4B-it", device="cuda"):
+        self.device = device
+        self.model_id = model_id
+        try:
+            import torch
+            from transformers import AutoModelForMultimodalLM, AutoProcessor
+            print(f"Loading {model_id} onto {device} (BF16)...", flush=True)
+            # No bitsandbytes as per user request (ROCm Windows issues)
+            self.model = AutoModelForMultimodalLM.from_pretrained(
+                model_id,
+                device_map=device,
+                torch_dtype=torch.bfloat16,
+                trust_remote_code=True
+            ).eval()
+            self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+            print(f"{model_id} loaded.", flush=True)
+        except Exception:
+            import traceback
+            print(f"CRITICAL: Failed to load {model_id}", flush=True)
+            print(traceback.format_exc(), flush=True)
+            raise
+
+    def transcribe_file(
+        self,
+        audio_path,
+        prompt_info="", 
+        clip_start=None,
+        clip_end=None,
+        mix_audio_path=None,
+        mix_weight=0.07,
+    ):
+        import torch
+        import librosa
+        import json
+        import re
+
+        print(f"Processing audio (Gemma-4): {os.path.basename(audio_path)}", flush=True)
+        
+        # 1. Load and resample audio (Gemma multimodal expects 16kHz)
+        # librosa handles various formats and resampling automatically
+        try:
+            audio, sr = librosa.load(audio_path, sr=16000, mono=True)
+        except Exception as e:
+            print(f"Error loading audio: {e}", flush=True)
+            return "", [], []
+
+        # Optional: Mix audio
+        if mix_audio_path:
+            try:
+                bg_audio, _ = librosa.load(mix_audio_path, sr=16000, mono=True)
+                # Trim or pad bg_audio to match length
+                min_len = min(len(audio), len(bg_audio))
+                audio[:min_len] = audio[:min_len] + bg_audio[:min_len] * mix_weight
+                print(f"Mixed in {os.path.basename(mix_audio_path)} at weight {mix_weight}", flush=True)
+            except Exception as e:
+                print(f"Failed to mix audio: {e}", flush=True)
+
+        total_duration = len(audio) / 16000.0
+        
+        # Window parameters (User requested 5s overlap for ASMR)
+        CHUNK_SIZE = 30 * 16000
+        OVERLAP = 5 * 16000
+        STRIDE = CHUNK_SIZE - OVERLAP
+        
+        all_segments = []
+        prev_tail = "null"
+        
+        # Start and end offsets if provided
+        start_sample = 0
+        end_sample = len(audio)
+        if clip_start is not None:
+            start_sample = int(float(clip_start) * 16000)
+        if clip_end is not None:
+            end_sample = min(int(float(clip_end) * 16000), len(audio))
+            
+        audio_to_process = audio[start_sample:end_sample]
+        global_offset_ms = int(start_sample / 16 * 1000) # relative to global start
+
+        for i, start_idx in enumerate(range(0, len(audio_to_process), STRIDE)):
+            end_idx = min(start_idx + CHUNK_SIZE, len(audio_to_process))
+            chunk = audio_to_process[start_idx:end_idx]
+            if len(chunk) < 1600 * 0.5: # Skip very short tail ends
+                break
+
+            current_chunk_start_ms = global_offset_ms + int(start_idx / 16)
+            
+            # Construct Japanese Prompt with Context
+            prompt = f"""以下の日本語 ASMR 音声セグメントを文字起こし（ASR）し、日本語の逐字録形式で出力してください。
+注意：この音声は長い音声の一部（例：30秒のウィンドウ）です。境界の切断とコンテキスト処理の規則を厳守してください。
+
+音軌：{os.path.basename(audio_path)}
+シーン説明：{prompt_info}
+
+現在のセグメント入力パラメータ：
+{{
+  "chunk_start_ms": {current_chunk_start_ms}, 
+  "previous_tail_text": {prev_tail}
+}}
+
+文字起こしおよび音声境界処理の規則：
+1. 末尾の切断破棄（重要）：現在の音声の末尾で発話が終了しておらず、意味が途切れている場合は、その不完全な文を文字起こしして出力しないでください。その末尾部分は無視し、次のセグメントでの処理に委ねてください。
+2. コンテキストの継続：previous_tail_text を参照して、現在の音声の冒頭の意味を理解してください。冒頭に前のセグメントですでに文字起こしされた単語が含まれている場合は、重複して出力しないでください。
+3. ノイズおよび言い間違いのフィルタリング：無意味な言い淀みや繰り返しは静かに無視し、完全でスムーズな文字起こし内容のみを出力してください。
+4. 擬音語および吐息：日本語の擬音語や呼吸、喘ぎ声（例：あ、ん、はあ、クチュ）をそのまま保持してください。
+5. フォーマット制限：text フィールドには日本語の原文のみを出力し、注釈や説明を加えないでください。
+
+出力形式：
+自然な意味の区切りに沿って改行（断句）し、JSON 配列形式で出力してください。
+タイムスタンプの計算：出力される start と end は、音声内の相対時間に chunk_start_ms を加え、絶対時間（ミリ秒）に変換してください。
+
+[
+  {{"text": "<日本語の完全な文>", "start": <絶対開始ms>, "end": <絶対結束ms>}},
+  ...
+]"""
+
+            # Prepare Inputs
+            # The structure follows Gemma-4 multimodal documentation
+            formatted_prompt = f"<|user|>\n{prompt}\n<|audio|>\n<|assistant|>\n"
+            inputs = self.processor(text=formatted_prompt, audio=chunk, sampling_rate=16000, return_tensors="pt").to(self.device, torch.bfloat16)
+
+            # Generate
+            with torch.inference_mode():
+                outputs = self.model.generate(**inputs, max_new_tokens=448, do_sample=True, temperature=0.7, top_p=0.9)
+            
+            # Decode only the assistant response part
+            input_len = inputs.input_ids.shape[1]
+            response = self.processor.decode(outputs[0][input_len:], skip_special_tokens=True)
+            
+            # Extract JSON from response
+            try:
+                # Find the JSON array
+                match = re.search(r"\[\s*\{.*\}\s*\]", response, re.DOTALL)
+                if match:
+                    chunk_segments = json.loads(match.group(0))
+                    if isinstance(chunk_segments, list):
+                        for seg in chunk_segments:
+                            all_segments.append({
+                                "text": seg.get("text", "").strip(),
+                                "start_time": seg.get("start", 0) / 1000.0,
+                                "end_time": seg.get("end", 0) / 1000.0,
+                                "words": [],
+                                "avg_logprob": 0.0,
+                                "compression_ratio": 0.0,
+                                "no_speech_prob": 0.0,
+                                "engine": "gemma"
+                            })
+                        if all_segments:
+                            prev_tail = f'"{all_segments[-1]["text"]}"'
+                else:
+                    print(f"Warning: No valid JSON segments found in chunk {i}. Content: {response[:100]}...", flush=True)
+                    prev_tail = "null"
+            except Exception as e:
+                print(f"Error parsing Gemma output for chunk {i}: {e}\nResponse: {response}", flush=True)
+                prev_tail = "null"
+
+        # Final Cleanup and Formatting
+        full_text = " ".join([s["text"] for s in all_segments])
+        sentences = [{"text": s["text"], "start_time": s["start_time"], "end_time": s["end_time"]} for s in all_segments]
+        
+        return full_text, sentences, all_segments

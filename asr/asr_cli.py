@@ -9,7 +9,7 @@ import json
 # Ensure local imports work
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from engine import ASREngine, MMSEngine
+from engine import ASREngine, MMSEngine, SenseVoiceEngine, QwenASREngine, GemmaASREngine
 
 # Sentinel printed after JSON is written — the Node.js parent detects this line
 # and kills us via child.kill("SIGKILL"), bypassing the CTranslate2+ROCm hang.
@@ -38,7 +38,7 @@ def main():
     parser.add_argument("--beam-size", type=int, default=5, help="Beam size")
     parser.add_argument("--mix-audio", help="Optional original audio to mix back (for sterile stems)")
     parser.add_argument("--mix-weight", type=float, default=0.07, help="Weight for mix-audio")
-    parser.add_argument("--engine", default="whisper", choices=["whisper", "mms", "qwen"], help="ASR engine: whisper, mms, or qwen")
+    parser.add_argument("--engine", default="whisper", choices=["whisper", "mms", "qwen", "sensevoice", "gemma"], help="ASR engine: whisper, mms, qwen, sensevoice, or gemma")
     parser.add_argument("--mms-lang", default="jpn", help="MMS target language")
     parser.add_argument("--intervals", help="Pipe-separated start,end pairs (e.g. '1.0,2.0|5.0,8.0') for batch processing")
 
@@ -69,11 +69,30 @@ def main():
             mix_weight=args.mix_weight,
         )
     elif args.engine == "qwen":
-        from engine import QwenASREngine
         engine = QwenASREngine(device=args.device)
         full_text, sentences, segments = engine.transcribe_file(
             args.audio,
             prompt=args.prompt,
+            clip_start=args.start,
+            clip_end=args.end,
+            mix_audio_path=args.mix_audio,
+            mix_weight=args.mix_weight,
+        )
+    elif args.engine == "sensevoice":
+        engine = SenseVoiceEngine(device=args.device)
+        full_text, sentences, segments = engine.transcribe_file(
+            args.audio,
+            prompt=args.prompt,
+            clip_start=args.start,
+            clip_end=args.end,
+            mix_audio_path=args.mix_audio,
+            mix_weight=args.mix_weight,
+        )
+    elif args.engine == "gemma":
+        engine = GemmaASREngine(device=args.device)
+        full_text, sentences, segments = engine.transcribe_file(
+            args.audio,
+            prompt_info=args.prompt,
             clip_start=args.start,
             clip_end=args.end,
             mix_audio_path=args.mix_audio,

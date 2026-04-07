@@ -90,11 +90,16 @@ export async function getTranscription(
   outputDir: string,
   options: {
     asrMode: "python" | "skip";
+    asrEngine: "whisper" | "mms" | "qwen" | "sensevoice" | "gemma";
     pythonExe: string;
     asrScript?: string | undefined;
     demucsScript?: string | undefined;
     asrPrompt?: string | undefined;
     saveAudioStems?: boolean;
+    useMmsRepair?: boolean;
+    useQwenRepair?: boolean;
+    useSenseVoiceRepair?: boolean;
+    useGemmaRepair?: boolean;
   },
 ): Promise<TranscriptFile | null> {
   if (options.asrMode === "skip") {
@@ -160,6 +165,7 @@ export async function getTranscription(
     const asrArgs = [
       "--audio", track.absolutePath, 
       "--prompt", options.asrPrompt ?? "", 
+      "--engine", options.asrEngine ?? "openai/whisper",
       "--output", asrPath,
     ];
 

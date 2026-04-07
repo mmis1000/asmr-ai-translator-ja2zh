@@ -76,6 +76,9 @@ ASR:
   --save-audio             Save separated audio stems for debugging
   --mms-repair             Enable MMS ASR as a fallback during surgical repair
   --qwen-repair            Enable Qwen-ASR as a fallback during surgical repair
+  --sensevoice-repair      Enable SenseVoice-ASR as a fallback during surgical repair
+  --gemma-repair           Enable Gemma-ASR as a fallback during surgical repair
+  --asr-engine <engine>    ASR engine to use: whisper, mms, qwen, sensevoice, gemma (default: whisper)
 
 Note: --dlsite with LLM extraction requires --meta-model or --meta-server-url.
       Without these, --dlsite still scrapes DLSite for basic metadata (title, VA,
@@ -125,6 +128,9 @@ function parseCliArgs(): TranslatorConfig {
       "repair-large-v3": { type: "boolean" },
       "mms-repair":      { type: "boolean" },
       "qwen-repair":     { type: "boolean" },
+      "sensevoice-repair": { type: "boolean" },
+      "gemma-repair":      { type: "boolean" },
+      "asr-engine":      { type: "string" },
       help:              { type: "boolean", short: "h" },
     },
     strict: true,
@@ -158,6 +164,11 @@ function parseCliArgs(): TranslatorConfig {
     console.error("Error: --asr must be 'python' or 'skip'"); process.exit(1);
   }
 
+  const asrEngine = values["asr-engine"] as "whisper" | "mms" | "qwen" | "sensevoice" | "gemma" | undefined;
+  if (asrEngine && !["whisper", "mms", "qwen", "sensevoice", "gemma"].includes(asrEngine)) {
+    console.error("Error: --asr-engine must be 'whisper', 'mms', 'qwen', 'sensevoice', or 'gemma'"); process.exit(1);
+  }
+
   const gpuLayersRaw = values["gpu-layers"];
   const gpuLayers: number | "auto" | "all" =
     gpuLayersRaw === "all" || gpuLayersRaw === "auto"
@@ -168,43 +179,46 @@ function parseCliArgs(): TranslatorConfig {
 
   return {
     ...DEFAULT_CONFIG,
-    inputDir: path.resolve(values.input),
-    outputDir: path.resolve(values.output),
-    modelPath: values.model ? path.resolve(values.model) : "",
-    hfRepo: values["hf-repo"] ? parseHfRepo(values["hf-repo"]) : undefined,
-    dlsiteId: values.dlsite,
-    metadataFile: values.metadata ? path.resolve(values.metadata) : undefined,
-    metaModelPath: values["meta-model"] ? path.resolve(values["meta-model"]) : undefined,
-    metaHfRepo: values["meta-hf-repo"] ? parseHfRepo(values["meta-hf-repo"]) : undefined,
-    metaServerUrl: values["meta-server-url"],
-    metaContextSize: values["meta-ctx-size"] ? parseInt(values["meta-ctx-size"], 10) : DEFAULT_CONFIG.metaContextSize,
-    llamaServerExe: values["llama-server"] ?? DEFAULT_CONFIG.llamaServerExe,
-    serverUrl: values["server-url"],
-    serverPort: values.port ? parseInt(values.port, 10) : DEFAULT_CONFIG.serverPort,
+    inputDir: path.resolve(values.input as string),
+    outputDir: path.resolve(values.output as string),
+    modelPath: values.model ? path.resolve(values.model as string) : "",
+    hfRepo: values["hf-repo"] ? parseHfRepo(values["hf-repo"] as string) : undefined,
+    dlsiteId: values.dlsite as string | undefined,
+    metadataFile: values.metadata ? path.resolve(values.metadata as string) : undefined,
+    metaModelPath: values["meta-model"] ? path.resolve(values["meta-model"] as string) : undefined,
+    metaHfRepo: values["meta-hf-repo"] ? parseHfRepo(values["meta-hf-repo"] as string) : undefined,
+    metaServerUrl: values["meta-server-url"] as string | undefined,
+    metaContextSize: values["meta-ctx-size"] ? parseInt(values["meta-ctx-size"] as string, 10) : DEFAULT_CONFIG.metaContextSize,
+    llamaServerExe: (values["llama-server"] as string) ?? DEFAULT_CONFIG.llamaServerExe,
+    serverUrl: values["server-url"] as string | undefined,
+    serverPort: values.port ? parseInt(values.port as string, 10) : DEFAULT_CONFIG.serverPort,
     gpuLayers,
-    contextSize: values["ctx-size"] ? parseInt(values["ctx-size"], 10) : DEFAULT_CONFIG.contextSize,
-    parallel: values.parallel ? parseInt(values.parallel, 10) : DEFAULT_CONFIG.parallel,
+    contextSize: values["ctx-size"] ? parseInt(values["ctx-size"] as string, 10) : DEFAULT_CONFIG.contextSize,
+    parallel: values.parallel ? parseInt(values.parallel as string, 10) : DEFAULT_CONFIG.parallel,
     locale: lang ?? DEFAULT_CONFIG.locale,
     mode: mode ?? DEFAULT_CONFIG.mode,
-    seed: values.seed !== undefined ? parseInt(values.seed, 10) : undefined,
-    debugLog: values["debug-log"] ?? DEFAULT_CONFIG.debugLog,
+    seed: values.seed !== undefined ? parseInt(values.seed as string, 10) : undefined,
+    debugLog: (values["debug-log"] as boolean) ?? DEFAULT_CONFIG.debugLog,
     asrMode: asrMode ?? DEFAULT_CONFIG.asrMode,
-    pythonExe: values["python-exe"] ?? DEFAULT_CONFIG.pythonExe,
-    asrScript: values["asr-script"],
-    demucsScript: values["demucs-script"],
-    vocalEnergyThreshold: values["vocal-threshold"] ? parseFloat(values["vocal-threshold"]) : DEFAULT_CONFIG.vocalEnergyThreshold,
-    vocalSilenceThreshold: values["vocal-silence-threshold"] ? parseFloat(values["vocal-silence-threshold"]) : DEFAULT_CONFIG.vocalSilenceThreshold,
-    snrThreshold: values["snr-threshold"] ? parseFloat(values["snr-threshold"]) : DEFAULT_CONFIG.snrThreshold,
-    minHallucinationLength: values["min-hallucination-length"] ? parseInt(values["min-hallucination-length"]) : DEFAULT_CONFIG.minHallucinationLength,
-    rejectNegativeSnr: values["reject-negative-snr"] ?? DEFAULT_CONFIG.rejectNegativeSnr,
-    repairTemperature: values["repair-temp"] ? parseFloat(values["repair-temp"]) : DEFAULT_CONFIG.repairTemperature,
-    repairBeamSize: values["repair-beam"] ? parseInt(values["repair-beam"]) : DEFAULT_CONFIG.repairBeamSize,
-    repairWithVocal:   values["repair-with-vocal"] ?? DEFAULT_CONFIG.repairWithVocal,
-    mixWeight:         values["mix-weight"] ? parseFloat(values["mix-weight"]) : DEFAULT_CONFIG.mixWeight,
-    saveAudioStems:    (values["repair-with-vocal"] ?? DEFAULT_CONFIG.repairWithVocal) ? true : (values["save-audio"] ?? DEFAULT_CONFIG.saveAudioStems),
-    repairLargeV3:     values["repair-large-v3"]   ?? DEFAULT_CONFIG.repairLargeV3,
-    useMmsRepair:      values["mms-repair"]        ?? DEFAULT_CONFIG.useMmsRepair,
-    useQwenRepair:     values["qwen-repair"]       ?? DEFAULT_CONFIG.useQwenRepair,
+    pythonExe: (values["python-exe"] as string) ?? DEFAULT_CONFIG.pythonExe,
+    asrScript: values["asr-script"] as string | undefined,
+    demucsScript: values["demucs-script"] as string | undefined,
+    vocalEnergyThreshold: values["vocal-threshold"] ? parseFloat(values["vocal-threshold"] as string) : DEFAULT_CONFIG.vocalEnergyThreshold,
+    vocalSilenceThreshold: values["vocal-silence-threshold"] ? parseFloat(values["vocal-silence-threshold"] as string) : DEFAULT_CONFIG.vocalSilenceThreshold,
+    snrThreshold: values["snr-threshold"] ? parseFloat(values["snr-threshold"] as string) : DEFAULT_CONFIG.snrThreshold,
+    minHallucinationLength: values["min-hallucination-length"] ? parseInt(values["min-hallucination-length"] as string) : DEFAULT_CONFIG.minHallucinationLength,
+    rejectNegativeSnr: (values["reject-negative-snr"] as boolean) ?? DEFAULT_CONFIG.rejectNegativeSnr,
+    repairTemperature: values["repair-temp"] ? parseFloat(values["repair-temp"] as string) : DEFAULT_CONFIG.repairTemperature,
+    repairBeamSize: values["repair-beam"] ? parseInt(values["repair-beam"] as string) : DEFAULT_CONFIG.repairBeamSize,
+    repairWithVocal:   (values["repair-with-vocal"] as boolean) ?? DEFAULT_CONFIG.repairWithVocal,
+    mixWeight:         values["mix-weight"] ? parseFloat(values["mix-weight"] as string) : DEFAULT_CONFIG.mixWeight,
+    saveAudioStems:    ((values["repair-with-vocal"] as boolean) ?? DEFAULT_CONFIG.repairWithVocal) ? true : ((values["save-audio"] as boolean) ?? DEFAULT_CONFIG.saveAudioStems),
+    repairLargeV3:     (values["repair-large-v3"] as boolean)   ?? DEFAULT_CONFIG.repairLargeV3,
+    useMmsRepair:      (values["mms-repair"] as boolean)        ?? DEFAULT_CONFIG.useMmsRepair,
+    useQwenRepair:     (values["qwen-repair"] as boolean)       ?? DEFAULT_CONFIG.useQwenRepair,
+    useSenseVoiceRepair: (values["sensevoice-repair"] as boolean) ?? DEFAULT_CONFIG.useSenseVoiceRepair,
+    useGemmaRepair:      (values["gemma-repair"] as boolean)      ?? DEFAULT_CONFIG.useGemmaRepair,
+    asrEngine:         asrEngine                   ?? DEFAULT_CONFIG.asrEngine,
   };
 }
 
@@ -411,6 +425,7 @@ async function main() {
 
     const transcript = await getTranscription(track, config.outputDir, {
       asrMode: config.asrMode,
+      asrEngine: config.asrEngine,
       pythonExe: config.pythonExe,
       asrScript: config.asrScript,
       demucsScript: config.demucsScript,
@@ -494,6 +509,8 @@ async function main() {
           asrPrompt: asrPrompt || undefined,
           useMmsRepair: config.useMmsRepair,
           useQwenRepair: config.useQwenRepair,
+          useSenseVoiceRepair: config.useSenseVoiceRepair,
+          useGemmaRepair: config.useGemmaRepair,
         },
         surgicalLog,
         vocalPath

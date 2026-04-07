@@ -21,6 +21,8 @@ dependencies = [
     "transformers",
     "accelerate",
     "qwen_asr",
+    "funasr",
+    "modelscope",
 ]
 
 [tool.uv.sources]

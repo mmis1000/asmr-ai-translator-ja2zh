@@ -40,6 +40,7 @@ export interface TranslatorConfig {
 
   // ASR
   asrMode: "python" | "skip";
+  asrEngine: "whisper" | "mms" | "qwen" | "sensevoice" | "gemma";
   pythonExe: string;
   asrScript?: string | undefined;
   demucsScript?: string | undefined;
@@ -61,6 +62,8 @@ export interface TranslatorConfig {
   saveAudioStems: boolean;
   useMmsRepair: boolean;
   useQwenRepair: boolean;
+  useSenseVoiceRepair: boolean;
+  useGemmaRepair: boolean;
 
   // Paths
   inputDir: string;
@@ -91,6 +94,7 @@ export const DEFAULT_CONFIG: Omit<TranslatorConfig,
   locale:         "zh-tw",
   mode:           "echo",
   asrMode:        "skip",
+  asrEngine:      "whisper",
   pythonExe:      DEFAULT_ASR_PYTHON,
   vocalEnergyThreshold: 0.001,
   vocalSilenceThreshold: 0.00005,
@@ -108,5 +112,7 @@ export const DEFAULT_CONFIG: Omit<TranslatorConfig,
   saveAudioStems: false,
   useMmsRepair: false,
   useQwenRepair: false,
+  useSenseVoiceRepair: false,
+  useGemmaRepair: false,
   debugLog:       false,
 };

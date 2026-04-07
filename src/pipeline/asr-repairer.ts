@@ -155,13 +155,6 @@ export async function repairTranscription(
         const goodInRange = currentSegments.filter(s =>
           !(s.end_time <= range.start || s.start_time >= range.end) && !s.mismatch
         );
-        currentSegments = currentSegments.filter(s =>
-          (s.end_time <= range.start || s.start_time >= range.end) || !s.mismatch
-        );
-        // Remove mismatch entries in this range
-        currentMismatches = currentMismatches.filter(m =>
-          m.end_time <= range.start || m.start_time >= range.end
-        );
 
         // Filter the new segments (Re-apply Demucs check)
         const passed: TranscriptSegment[] = [];
@@ -192,12 +185,20 @@ export async function repairTranscription(
         }
 
         if (passed.length > 0) {
+          // Atomic Replacement: Only remove originals if we have valid ones to add
+          currentSegments = currentSegments.filter(s =>
+            (s.end_time <= range.start || s.start_time >= range.end) || !s.mismatch
+          );
+          currentMismatches = currentMismatches.filter(m =>
+            m.end_time <= range.start || m.start_time >= range.end
+          );
+
           currentSegments.push(...passed);
           repairEntry.status = "success";
           console.log(`     Repair successful: ${passed.length} new valid segments added.`);
         } else {
           repairEntry.status = "failed";
-          console.log(`     Repair produced no non-conflicting valid content.`);
+          console.log(`     Repair produced no non-conflicting valid content. Original segments preserved.`);
         }
       } else {
         console.log(`     Repair produced no new content.`);
@@ -246,21 +247,26 @@ export function applySurgicalRepair(
     const goodInRange = currentSegments.filter(s =>
       !(s.end_time <= range.start || s.start_time >= range.end) && !s.mismatch
     );
-    currentSegments = currentSegments.filter(s =>
-      (s.end_time <= range.start || s.start_time >= range.end) || !s.mismatch
-    );
-    currentMismatches = currentMismatches.filter(m =>
-      m.end_time <= range.start || m.start_time >= range.end
-    );
 
     // Only insert repair segments that don't conflict with kept good segments.
+    const toAdd: TranscriptSegment[] = [];
     for (const s of entry.newSegments) {
       const conflictsWithGood = goodInRange.some(g =>
         g.start_time < s.end_time && g.end_time > s.start_time
       );
       if (!conflictsWithGood) {
-        currentSegments.push(s);
+        toAdd.push(s);
       }
+    }
+
+    if (toAdd.length > 0) {
+      currentSegments = currentSegments.filter(s =>
+        (s.end_time <= range.start || s.start_time >= range.end) || !s.mismatch
+      );
+      currentMismatches = currentMismatches.filter(m =>
+        m.end_time <= range.start || m.start_time >= range.end
+      );
+      currentSegments.push(...toAdd);
     }
   }
 

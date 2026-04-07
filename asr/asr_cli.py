@@ -25,6 +25,12 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
 sys.excepthook = global_exception_handler
 
 
+def derive_slice_path(base_path, win_start):
+    """Derive a per-window audio slice path from a base path and window start time."""
+    root, ext = os.path.splitext(base_path)
+    return f"{root}_{int(win_start)}s{ext}"
+
+
 def main():
     parser = argparse.ArgumentParser(description="CTranslate2/Whisper ASR CLI for asmr-one-dump")
     parser.add_argument("--audio", required=True, help="Path to audio file")
@@ -32,16 +38,14 @@ def main():
     parser.add_argument("--output", required=True, help="Path to save JSON output")
     parser.add_argument("--device", default="cuda", help="Device: cuda or cpu")
     parser.add_argument("--model", default="large-v3-turbo", help="Whisper model size")
-    parser.add_argument("--start", type=float, help="Clip start time in seconds")
-    parser.add_argument("--end", type=float, help="Clip end time in seconds")
+    parser.add_argument("--windows", help="JSON array of [start, end] pairs, e.g. '[[0,10],[20,30]]'. Omit for full-file transcription.")
     parser.add_argument("--temperature", type=float, help="Whisper temperature")
     parser.add_argument("--beam-size", type=int, default=5, help="Beam size")
     parser.add_argument("--mix-audio", help="Optional original audio to mix back (for sterile stems)")
     parser.add_argument("--mix-weight", type=float, default=0.07, help="Weight for mix-audio")
     parser.add_argument("--engine", default="whisper", choices=["whisper", "mms", "qwen", "sensevoice", "gemma"], help="ASR engine: whisper, mms, qwen, sensevoice, or gemma")
     parser.add_argument("--mms-lang", default="jpn", help="MMS target language")
-    parser.add_argument("--intervals", help="Pipe-separated start,end pairs (e.g. '1.0,2.0|5.0,8.0') for batch processing")
-    parser.add_argument("--save-audio-slice", help="Save the exact audio slice (with mixing) used for processing to this path (.wav)")
+    parser.add_argument("--save-audio-slice", help="Save the audio slice(s) used for processing. In multi-window mode, each window is saved as <base>_<start>s<ext>.")
 
     args = parser.parse_args()
 
@@ -49,18 +53,13 @@ def main():
         print(f"Error: Audio file not found: {args.audio}", flush=True)
         sys.exit(1)
 
+    windows = json.loads(args.windows) if args.windows else None
+
     if args.engine == "mms":
         engine = MMSEngine(device=args.device)
-        
-        # Parse intervals if provided, else use start/end
-        intervals = []
-        if args.intervals:
-            for pair in args.intervals.split("|"):
-                if "," in pair:
-                    s, e = pair.split(",")
-                    intervals.append((float(s), float(e)))
-        elif args.start is not None and args.end is not None:
-            intervals.append((args.start, args.end))
+
+        # Build intervals from --windows (or empty list for full-file)
+        intervals = [(s, e) for s, e in windows] if windows else []
 
         full_text, sentences, segments = engine.transcribe_file(
             args.audio,
@@ -70,59 +69,130 @@ def main():
             mix_weight=args.mix_weight,
             save_audio_slice_path=args.save_audio_slice,
         )
+
+        if windows:
+            # Wrap in array format; MMS produces one combined result across all intervals
+            output_data = [{"window": windows, "full_text": full_text, "sentences": sentences, "segments": segments}]
+        else:
+            output_data = {"full_text": full_text, "sentences": sentences, "segments": segments}
+
     elif args.engine == "qwen":
         engine = QwenASREngine(device=args.device)
-        full_text, sentences, segments = engine.transcribe_file(
-            args.audio,
-            prompt=args.prompt,
-            clip_start=args.start,
-            clip_end=args.end,
-            mix_audio_path=args.mix_audio,
-            mix_weight=args.mix_weight,
-            save_audio_slice_path=args.save_audio_slice,
-        )
+        if windows:
+            window_results = []
+            for win_start, win_end in windows:
+                print(f"  -> Window [{win_start:.2f}s - {win_end:.2f}s]", flush=True)
+                slice_path = derive_slice_path(args.save_audio_slice, win_start) if args.save_audio_slice else None
+                ft, sents, segs = engine.transcribe_file(
+                    args.audio,
+                    prompt=args.prompt,
+                    clip_start=win_start,
+                    clip_end=win_end,
+                    mix_audio_path=args.mix_audio,
+                    mix_weight=args.mix_weight,
+                    save_audio_slice_path=slice_path,
+                )
+                window_results.append({"window": [win_start, win_end], "full_text": ft, "sentences": sents, "segments": segs})
+            output_data = window_results
+        else:
+            full_text, sentences, segments = engine.transcribe_file(
+                args.audio,
+                prompt=args.prompt,
+                mix_audio_path=args.mix_audio,
+                mix_weight=args.mix_weight,
+                save_audio_slice_path=args.save_audio_slice,
+            )
+            output_data = {"full_text": full_text, "sentences": sentences, "segments": segments}
+
     elif args.engine == "sensevoice":
         engine = SenseVoiceEngine(device=args.device)
-        full_text, sentences, segments = engine.transcribe_file(
-            args.audio,
-            prompt=args.prompt,
-            clip_start=args.start,
-            clip_end=args.end,
-            mix_audio_path=args.mix_audio,
-            mix_weight=args.mix_weight,
-            save_audio_slice_path=args.save_audio_slice,
-        )
+        if windows:
+            window_results = []
+            for win_start, win_end in windows:
+                print(f"  -> Window [{win_start:.2f}s - {win_end:.2f}s]", flush=True)
+                slice_path = derive_slice_path(args.save_audio_slice, win_start) if args.save_audio_slice else None
+                ft, sents, segs = engine.transcribe_file(
+                    args.audio,
+                    prompt=args.prompt,
+                    clip_start=win_start,
+                    clip_end=win_end,
+                    mix_audio_path=args.mix_audio,
+                    mix_weight=args.mix_weight,
+                    save_audio_slice_path=slice_path,
+                )
+                window_results.append({"window": [win_start, win_end], "full_text": ft, "sentences": sents, "segments": segs})
+            output_data = window_results
+        else:
+            full_text, sentences, segments = engine.transcribe_file(
+                args.audio,
+                prompt=args.prompt,
+                mix_audio_path=args.mix_audio,
+                mix_weight=args.mix_weight,
+                save_audio_slice_path=args.save_audio_slice,
+            )
+            output_data = {"full_text": full_text, "sentences": sentences, "segments": segments}
+
     elif args.engine == "gemma":
         engine = GemmaASREngine(device=args.device)
-        full_text, sentences, segments = engine.transcribe_file(
-            args.audio,
-            prompt_info=args.prompt,
-            clip_start=args.start,
-            clip_end=args.end,
-            mix_audio_path=args.mix_audio,
-            mix_weight=args.mix_weight,
-            save_audio_slice_path=args.save_audio_slice,
-        )
-    else:
-        engine = ASREngine(model_size=args.model, device=args.device)
-        full_text, sentences, segments = engine.transcribe_file(
-            args.audio,
-            prompt=args.prompt,
-            clip_start=args.start,
-            clip_end=args.end,
-            temperature=args.temperature,
-            beam_size=args.beam_size,
-            condition_on_previous_text=True,
-            mix_audio_path=args.mix_audio,
-            mix_weight=args.mix_weight,
-            save_audio_slice_path=args.save_audio_slice,
-        )
+        if windows:
+            window_results = []
+            for win_start, win_end in windows:
+                print(f"  -> Window [{win_start:.2f}s - {win_end:.2f}s]", flush=True)
+                slice_path = derive_slice_path(args.save_audio_slice, win_start) if args.save_audio_slice else None
+                ft, sents, segs = engine.transcribe_file(
+                    args.audio,
+                    prompt_info=args.prompt,
+                    clip_start=win_start,
+                    clip_end=win_end,
+                    mix_audio_path=args.mix_audio,
+                    mix_weight=args.mix_weight,
+                    save_audio_slice_path=slice_path,
+                )
+                window_results.append({"window": [win_start, win_end], "full_text": ft, "sentences": sents, "segments": segs})
+            output_data = window_results
+        else:
+            full_text, sentences, segments = engine.transcribe_file(
+                args.audio,
+                prompt_info=args.prompt,
+                mix_audio_path=args.mix_audio,
+                mix_weight=args.mix_weight,
+                save_audio_slice_path=args.save_audio_slice,
+            )
+            output_data = {"full_text": full_text, "sentences": sentences, "segments": segments}
 
-    output_data = {
-        "full_text": full_text,
-        "sentences": sentences,
-        "segments": segments,
-    }
+    else:  # whisper
+        engine = ASREngine(model_size=args.model, device=args.device)
+        if windows:
+            window_results = []
+            for win_start, win_end in windows:
+                print(f"  -> Window [{win_start:.2f}s - {win_end:.2f}s]", flush=True)
+                slice_path = derive_slice_path(args.save_audio_slice, win_start) if args.save_audio_slice else None
+                ft, sents, segs = engine.transcribe_file(
+                    args.audio,
+                    prompt=args.prompt,
+                    clip_start=win_start,
+                    clip_end=win_end,
+                    temperature=args.temperature,
+                    beam_size=args.beam_size,
+                    condition_on_previous_text=True,
+                    mix_audio_path=args.mix_audio,
+                    mix_weight=args.mix_weight,
+                    save_audio_slice_path=slice_path,
+                )
+                window_results.append({"window": [win_start, win_end], "full_text": ft, "sentences": sents, "segments": segs})
+            output_data = window_results
+        else:
+            full_text, sentences, segments = engine.transcribe_file(
+                args.audio,
+                prompt=args.prompt,
+                temperature=args.temperature,
+                beam_size=args.beam_size,
+                condition_on_previous_text=True,
+                mix_audio_path=args.mix_audio,
+                mix_weight=args.mix_weight,
+                save_audio_slice_path=args.save_audio_slice,
+            )
+            output_data = {"full_text": full_text, "sentences": sentences, "segments": segments}
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as f:

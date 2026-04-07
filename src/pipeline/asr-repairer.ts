@@ -93,142 +93,185 @@ export async function repairTranscription(
   // Otherwise default to the dirname of the audioPath (original behavior, but usually we have vocalPath now)
   const tempDir = vocalPath ? path.dirname(path.dirname(vocalPath)) : path.dirname(audioPath);
 
-  for (const range of windowsToRepair) {
-    console.log(`  -> Repairing [${range.start.toFixed(1)}s - ${range.end.toFixed(1)}s] (${range.reason})...`);
+  // Determine which engine to use (one engine per repair pass)
+  const engineType: "whisper" | "mms" | "qwen" | "sensevoice" | "gemma" =
+    options.useQwenRepair ? "qwen"
+    : options.useMmsRepair ? "mms"
+    : options.useSenseVoiceRepair ? "sensevoice"
+    : options.useGemmaRepair ? "gemma"
+    : "whisper";
 
-    // Capture original segments in this range for logging
-    const originalInRange = initialSegments.filter(s => 
+  console.log(`  -> Engine: ${engineType} | Batching ${windowsToRepair.length} window(s) into one call...`);
+
+  // Choose input audio once (same for all windows in this pass)
+  let inputAudio = audioPath;
+  let mixAudio: string | undefined = undefined;
+  if (options.repairWithVocal && vocalPath) {
+    if (fs.existsSync(vocalPath)) {
+      inputAudio = vocalPath;
+      mixAudio = audioPath;
+      console.log(`  -> Using mixed vocal stem: ${path.basename(vocalPath)} (+ ${Math.round(options.mixWeight * 100)}% original)`);
+    } else {
+      console.warn(`  -> Warning: Vocal stem NOT found at ${vocalPath}. Falling back to original audio.`);
+    }
+  }
+
+  // Build per-window jobs
+  type WindowJob = {
+    range: TimeRange;
+    rangeArgs: TimeRange[];     // non-MMS: [range]; MMS: speech clusters within range
+    originalInRange: TranscriptSegment[];
+    mismatchesInRange: TranscriptSegment[];
+  };
+
+  const jobs: WindowJob[] = windowsToRepair.map(range => {
+    const originalInRange = initialSegments.filter(s =>
       s.start_time >= range.start && s.end_time <= range.end
     );
-    const mismatchesInRange = initialMismatches.filter(m => 
+    const mismatchesInRange = initialMismatches.filter(m =>
       m.start_time >= range.start && m.end_time <= range.end
     );
-    mismatchesInRange.forEach(m => {
+    const rangeArgs = options.useMmsRepair
+      ? getSpeechClusters(windows, range, options.vocalThreshold, options.snrThreshold)
+      : [range];
+    return { range, rangeArgs, originalInRange, mismatchesInRange };
+  });
+
+  // Log per-window mismatches before the batch call
+  for (const job of jobs) {
+    console.log(`  -> [${job.range.start.toFixed(1)}s - ${job.range.end.toFixed(1)}s] (${job.range.reason})`);
+    job.mismatchesInRange.forEach(m => {
       console.log(`     - [${m.mismatch?.type}] ${m.mismatch?.reason}`);
     });
+    if (options.useMmsRepair) {
+      console.log(`     - ${job.rangeArgs.length} MMS cluster(s)`);
+    }
+  }
 
-    const repairFile = path.join(tempDir, `.tmp_repair_${range.start.toFixed(0)}.json`);
-    
-    try {
-      // Choose input audio: vocal stem if requested and available, else original
-      let inputAudio = audioPath;
-      let mixAudio: string | undefined = undefined;
+  // Build repair audio base path (Python derives per-window paths as <base>_<start>s<ext>)
+  let repairAudioBasePath: string | undefined = undefined;
+  if (options.saveRepairAudio) {
+    const repairAudioDir = path.join(tempDir, "repair_audio_fragments");
+    if (!fs.existsSync(repairAudioDir)) fs.mkdirSync(repairAudioDir, { recursive: true });
+    const stem = path.basename(audioPath, path.extname(audioPath));
+    repairAudioBasePath = path.join(repairAudioDir, `${stem}_repair.wav`);
+  }
 
-      if (options.repairWithVocal && vocalPath) {
-        if (fs.existsSync(vocalPath)) {
-          inputAudio = vocalPath;
-          mixAudio = audioPath; // Mix-back the original audio
-          console.log(`     - Using mixed vocal stem for repair: ${path.basename(vocalPath)} (+ ${Math.round(options.mixWeight * 100)}% original)`);
-        } else {
-          console.warn(`     - Warning: Vocal stem requested but NOT found at ${vocalPath}. Falling back to original audio.`);
+  // Active jobs: skip MMS windows with no clusters (nothing to process)
+  const activeJobs = jobs.filter(j => j.rangeArgs.length > 0);
+  const allRangeArgs = activeJobs.flatMap(j => j.rangeArgs);
+
+  const batchRepairFile = path.join(tempDir, `.tmp_repair_batch.json`);
+  let windowResults: WindowResult[] = [];
+
+  try {
+    if (activeJobs.length > 0) {
+      windowResults = await runSurgicalASR(
+        inputAudio, allRangeArgs, batchRepairFile, options, mixAudio, engineType, repairAudioBasePath
+      );
+    }
+  } catch (err) {
+    console.error(`  [REPAIR] Batch ASR call failed:`, err);
+  } finally {
+    if (fs.existsSync(batchRepairFile)) fs.unlinkSync(batchRepairFile);
+  }
+
+  // Apply results per-window
+  // Non-MMS: windowResults are in the same order as activeJobs (one result per window)
+  // MMS: one combined result; filter by time range
+  let activeJobIdx = 0;
+
+  for (const job of jobs) {
+    const { range } = job;
+    const repairEntry: SurgicalRepairEntry = {
+      range,
+      originalSegments: job.originalInRange,
+      newSegments: [],
+      status: "no_change",
+    };
+
+    if (job.rangeArgs.length === 0) {
+      // MMS found no speech clusters in this window
+      repairEntry.status = "failed";
+      console.log(`  -> [${range.start.toFixed(1)}s] No MMS clusters found, skipping.`);
+      surgicalLog.push(repairEntry);
+      continue;
+    }
+
+    let newSegments: TranscriptSegment[];
+    if (options.useMmsRepair) {
+      // MMS: one combined result for all clusters; filter to this window's range
+      const mmsResult = windowResults[0];
+      newSegments = (mmsResult?.segments ?? []).filter(
+        s => s.start_time >= range.start - 0.5 && s.end_time <= range.end + 0.5
+      );
+    } else {
+      // Non-MMS: one result element per active job, in order
+      const result = windowResults[activeJobIdx++];
+      newSegments = result?.segments ?? [];
+    }
+
+    if (newSegments.length > 0) {
+      repairEntry.newSegments = newSegments;
+
+      // Only remove BAD (mismatch) segments in this range. Good segments
+      // within the padded region are preserved — the 2s padding is for ASR
+      // context only, not a replacement zone. Removing all segments caused
+      // repair fragments landing in the padding to silently drop valid content.
+      const goodInRange = currentSegments.filter(s =>
+        !(s.end_time <= range.start || s.start_time >= range.end) && !s.mismatch
+      );
+
+      // Filter the new segments (Re-apply Demucs check)
+      const passed: TranscriptSegment[] = [];
+      for (const s of newSegments) {
+        // KEY: Merge original energy data into the new segments
+        mergeEnergyToSegment(s, windows);
+
+        const garbled = isGarbled(s, {
+          vocalThreshold: options.vocalThreshold,
+          vocalSilenceThreshold: options.vocalSilenceThreshold,
+          snrThreshold: options.snrThreshold,
+          minHallLength: options.minHallLength,
+          rejectNegativeSnr: options.rejectNegativeSnr,
+        }, true);
+
+        if (!garbled) {
+          // Only insert repair segments that don't conflict with good originals
+          // that were kept from the padding zone.
+          const conflictsWithGood = goodInRange.some(g =>
+            g.start_time < s.end_time && g.end_time > s.start_time
+          );
+          if (!conflictsWithGood) {
+            passed.push(s);
+          }
+        } else if (s.mismatch) {
+          currentMismatches.push(s);
         }
       }
 
-      let newSegments: TranscriptSegment[] = [];
-      let repairAudioPath: string | undefined = undefined;
-
-      if (options.saveRepairAudio) {
-        const repairAudioDir = path.join(tempDir, "repair_audio_fragments");
-        if (!fs.existsSync(repairAudioDir)) fs.mkdirSync(repairAudioDir, { recursive: true });
-        
-        const stem = path.basename(audioPath, path.extname(audioPath));
-        repairAudioPath = path.join(repairAudioDir, `${stem}_repair_${range.start.toFixed(0)}.wav`);
-      }
-
-      if (options.useQwenRepair) {
-        console.log(`     - Using Qwen engine for repair (Full Switch)...`);
-        newSegments = await runSurgicalASR(inputAudio, range, repairFile, options, mixAudio, "qwen", repairAudioPath);
-      } else if (options.useMmsRepair) {
-        console.log(`     - Using MMS engine for repair (Full Switch)...`);
-        const clusters = getSpeechClusters(windows, range, options.vocalThreshold, options.snrThreshold);
-        console.log(`     - Batching ${clusters.length} speech cluster(s) for MMS engine.`);
-        
-        if (clusters.length > 0) {
-           newSegments = await runSurgicalASR(inputAudio, clusters, repairFile, options, mixAudio, "mms", repairAudioPath);
-        }
-      } else if (options.useSenseVoiceRepair) {
-        console.log(`     - Using SenseVoice engine for repair (Full Switch)...`);
-        newSegments = await runSurgicalASR(inputAudio, range, repairFile, options, mixAudio, "sensevoice", repairAudioPath);
-      } else if (options.useGemmaRepair) {
-        console.log(`     - Using Gemma engine for repair (Full Switch)...`);
-        newSegments = await runSurgicalASR(inputAudio, range, repairFile, options, mixAudio, "gemma", repairAudioPath);
-      } else {
-        newSegments = await runSurgicalASR(inputAudio, range, repairFile, options, mixAudio, "whisper", repairAudioPath);
-      }
-      
-      const repairEntry: SurgicalRepairEntry = {
-        range,
-        originalSegments: originalInRange,
-        newSegments: [], // To be populated
-        status: "no_change"
-      };
-
-      if (newSegments.length > 0) {
-        repairEntry.newSegments = newSegments;
-
-        // Only remove BAD (mismatch) segments in this range. Good segments
-        // within the padded region are preserved — the 2s padding is for ASR
-        // context only, not a replacement zone. Removing all segments caused
-        // repair fragments landing in the padding to silently drop valid content.
-        const goodInRange = currentSegments.filter(s =>
-          !(s.end_time <= range.start || s.start_time >= range.end) && !s.mismatch
+      if (passed.length > 0) {
+        // Atomic Replacement: Only remove originals if we have valid ones to add
+        currentSegments = currentSegments.filter(s =>
+          (s.end_time <= range.start || s.start_time >= range.end) || !s.mismatch
+        );
+        currentMismatches = currentMismatches.filter(m =>
+          m.end_time <= range.start || m.start_time >= range.end
         );
 
-        // Filter the new segments (Re-apply Demucs check)
-        const passed: TranscriptSegment[] = [];
-        for (const s of newSegments) {
-          // KEY: Merge original energy data into the new segments
-          mergeEnergyToSegment(s, windows);
-
-          const garbled = isGarbled(s, {
-            vocalThreshold: options.vocalThreshold,
-            vocalSilenceThreshold: options.vocalSilenceThreshold,
-            snrThreshold: options.snrThreshold,
-            minHallLength: options.minHallLength,
-            rejectNegativeSnr: options.rejectNegativeSnr,
-          }, true);
-
-          if (!garbled) {
-            // Only insert repair segments that don't conflict with good originals
-            // that were kept from the padding zone.
-            const conflictsWithGood = goodInRange.some(g =>
-              g.start_time < s.end_time && g.end_time > s.start_time
-            );
-            if (!conflictsWithGood) {
-              passed.push(s);
-            }
-          } else if (s.mismatch) {
-            currentMismatches.push(s);
-          }
-        }
-
-        if (passed.length > 0) {
-          // Atomic Replacement: Only remove originals if we have valid ones to add
-          currentSegments = currentSegments.filter(s =>
-            (s.end_time <= range.start || s.start_time >= range.end) || !s.mismatch
-          );
-          currentMismatches = currentMismatches.filter(m =>
-            m.end_time <= range.start || m.start_time >= range.end
-          );
-
-          currentSegments.push(...passed);
-          repairEntry.status = "success";
-          console.log(`     Repair successful: ${passed.length} new valid segments added.`);
-        } else {
-          repairEntry.status = "failed";
-          console.log(`     Repair produced no non-conflicting valid content. Original segments preserved.`);
-        }
+        currentSegments.push(...passed);
+        repairEntry.status = "success";
+        console.log(`     [${range.start.toFixed(1)}s] Repair successful: ${passed.length} new valid segments added.`);
       } else {
-        console.log(`     Repair produced no new content.`);
+        repairEntry.status = "failed";
+        console.log(`     [${range.start.toFixed(1)}s] Repair produced no non-conflicting valid content.`);
       }
+    } else {
+      console.log(`     [${range.start.toFixed(1)}s] Repair produced no new content.`);
+    }
 
-      if (repairEntry.status !== "no_change") {
-        surgicalLog.push(repairEntry);
-      }
-    } catch (err) {
-      console.error(`     Repair failed for range ${range.start}-${range.end}:`, err);
-    } finally {
-      if (fs.existsSync(repairFile)) fs.unlinkSync(repairFile);
+    if (repairEntry.status !== "no_change") {
+      surgicalLog.push(repairEntry);
     }
   }
 
@@ -359,15 +402,22 @@ function getSpeechClusters(
   });
 }
 
+type WindowResult = {
+  window: [number, number] | number[][];
+  full_text: string;
+  sentences: unknown[];
+  segments: TranscriptSegment[];
+};
+
 async function runSurgicalASR(
   audioPath: string,
-  range: TimeRange | TimeRange[],
+  ranges: TimeRange[],
   outputJson: string,
   options: RepairOptions,
   mixAudioPath: string | undefined,
   engine: "whisper" | "mms" | "qwen" | "sensevoice" | "gemma",
-  repairAudioPath?: string
-): Promise<TranscriptSegment[]> {
+  repairAudioBasePath?: string
+): Promise<WindowResult[]> {
   return new Promise((resolve, reject) => {
     const asrScript = options.asrScript || DEFAULT_ASR_SCRIPT;
 
@@ -391,28 +441,23 @@ async function runSurgicalASR(
       "--model", options.model,
       "--device", options.device,
       "--engine", engine,
+      "--windows", JSON.stringify(ranges.map(r => [r.start, r.end])),
     ];
 
-    if (repairAudioPath) {
-      args.push("--save-audio-slice", repairAudioPath);
+    if (repairAudioBasePath) {
+      // Python derives per-window paths as <base>_<start>s<ext>
+      args.push("--save-audio-slice", repairAudioBasePath);
     }
 
-    if ((engine === "whisper" || engine === "qwen" || engine === "sensevoice" || engine === "gemma") && !Array.isArray(range)) {
-      args.push("--start", range.start.toFixed(3));
-      args.push("--end", range.end.toFixed(3));
-      if (engine === "whisper") {
-        args.push("--beam-size", options.repairBeamSize.toString());
-        if (options.repairTemperature !== null) {
-          args.push("--temperature", options.repairTemperature.toString());
-        }
+    if (engine === "whisper") {
+      args.push("--beam-size", options.repairBeamSize.toString());
+      if (options.repairTemperature !== null) {
+        args.push("--temperature", options.repairTemperature.toString());
       }
-      if (options.asrPrompt) {
-        args.push("--prompt", options.asrPrompt);
-      }
-    } else if (engine === "mms") {
-      const ranges = Array.isArray(range) ? range : [range];
-      const intervals = ranges.map(r => `${r.start.toFixed(3)},${r.end.toFixed(3)}`).join("|");
-      args.push("--intervals", intervals);
+    }
+
+    if (options.asrPrompt && engine !== "mms") {
+      args.push("--prompt", options.asrPrompt);
     }
 
     if (mixAudioPath) {
@@ -451,10 +496,24 @@ async function runSurgicalASR(
       }
 
       try {
-        const data = JSON.parse(fs.readFileSync(outputJson, "utf-8")) as TranscriptFile;
-        // Tag the segments with the engine used
-        const segments = (data.segments || []).map(s => ({ ...s, engine }));
-        resolve(segments);
+        const raw = JSON.parse(fs.readFileSync(outputJson, "utf-8"));
+        if (Array.isArray(raw)) {
+          // Multi-window output: tag segments with engine and return as-is
+          const results = (raw as WindowResult[]).map(w => ({
+            ...w,
+            segments: (w.segments || []).map(s => ({ ...s, engine })),
+          }));
+          resolve(results);
+        } else {
+          // Single full-file result (no --windows): wrap in array
+          const data = raw as TranscriptFile;
+          resolve([{
+            window: [0, Infinity],
+            full_text: data.full_text || "",
+            sentences: data.sentences || [],
+            segments: (data.segments || []).map(s => ({ ...s, engine })),
+          }]);
+        }
       } catch (err) {
         reject(err);
       }

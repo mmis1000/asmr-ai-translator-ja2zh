@@ -174,13 +174,16 @@ export function formatTranscriptionJson(segments: Segment[]): string {
 }
 
 export function filterGlossary(g: GlossaryLang, japaneseText: string): GlossaryLang {
-  const filter = (entries: GlossaryEntry[]) =>
+  const filterExact = (entries: GlossaryEntry[]) =>
     entries.filter((e) => e.ja && japaneseText.includes(e.ja));
+  const filterValid = (entries: GlossaryEntry[]) =>
+    entries.filter((e) => e.ja);
+
   return {
     ...g,
-    cvs: filter(g.cvs),
-    characters: filter(g.characters),
-    terms: filter(g.terms),
+    cvs: filterValid(g.cvs),
+    characters: filterValid(g.characters),
+    terms: filterExact(g.terms),
   };
 }
 

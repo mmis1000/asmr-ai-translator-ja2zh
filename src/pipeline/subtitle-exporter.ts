@@ -61,7 +61,7 @@ function msToVtt(ms: number): string {
 /** Convert translation entries to LRC subtitle format. */
 export function toLrc(entries: TranslationEntry[]): string {
   const lines: string[] = [];
-  const valid = mergeSameStart(entries.filter(e => e.text != null));
+  const valid = mergeSameStart(entries.filter(e => e.text && e.text.trim()));
 
   for (let i = 0; i < valid.length; i++) {
     const entry = valid[i]!;
@@ -80,7 +80,7 @@ export function toLrc(entries: TranslationEntry[]): string {
 /** Convert translation entries to WebVTT subtitle format. */
 export function toVtt(entries: TranslationEntry[]): string {
   const lines: string[] = ["WEBVTT", ""];
-  const valid = mergeSameStart(entries.filter(e => e.text != null));
+  const valid = mergeSameStart(entries.filter(e => e.text && e.text.trim()));
 
   for (let i = 0; i < valid.length; i++) {
     const entry = valid[i]!;

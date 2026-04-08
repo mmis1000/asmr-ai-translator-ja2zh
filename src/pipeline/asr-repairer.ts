@@ -228,7 +228,32 @@ export async function repairTranscription(
         // KEY: Merge original energy data into the new segments
         mergeEnergyToSegment(s, windows);
 
-        const garbled = isGarbled(s, {
+        const isMms = s.engine === "mms";
+        
+        if (isMms) {
+          const originalText = s.text;
+          const trimmed = s.text.trim();
+
+          // Pure short Latin noise (e.g. "a", "bc") → blank it
+          const isLatinNoise = /^[a-z]{1,2}$/i.test(trimmed);
+          if (isLatinNoise) s.text = "";
+
+          // Sub-word CTC artifact: single sound/phoneme rather than a word.
+          // In MMS, a segment this short is a stray frame alignment, not speech content.
+          const cjkCharCount = (trimmed.match(/[\u3040-\u30ff\u4e00-\u9fff\uff66-\uff9f]/g) || []).length;
+          if (cjkCharCount < 2 && trimmed.replace(/\s|[^\w\u3040-\u30ff\u4e00-\u9fff\uff66-\uff9f]/g, "").length < 2) {
+            console.log(`     [DEBUG] MMS segment rejected (sub-word): "${originalText}" at ${s.start_time.toFixed(2)}s`);
+            continue;
+          }
+
+          const isSilent = (s.vocal_energy || 0) < options.vocalSilenceThreshold;
+          if (isSilent) {
+            console.log(`     [DEBUG] MMS segment rejected (silent): "${originalText}" at ${s.start_time.toFixed(2)}s (Energy: ${s.vocal_energy?.toFixed(6)})`);
+            continue;
+          }
+        }
+
+        const garbled = isMms ? false : isGarbled(s, {
           vocalThreshold: options.vocalThreshold,
           vocalSilenceThreshold: options.vocalSilenceThreshold,
           snrThreshold: options.snrThreshold,
@@ -239,21 +264,23 @@ export async function repairTranscription(
         if (!garbled) {
           // Only insert repair segments that don't conflict with good originals
           // that were kept from the padding zone.
-          const conflictsWithGood = goodInRange.some(g =>
+          const blockingGood = goodInRange.find(g =>
             g.start_time < s.end_time && g.end_time > s.start_time
           );
-          if (!conflictsWithGood) {
+          if (!blockingGood) {
             passed.push(s);
+          } else {
+            console.log(`     [DEBUG] MMS segment rejected (conflict): "${s.text}" overlaps "${blockingGood.text}" at ${blockingGood.start_time.toFixed(1)}s`);
           }
-        } else if (s.mismatch) {
-          currentMismatches.push(s);
         }
       }
 
       if (passed.length > 0) {
-        // Atomic Replacement: Only remove originals if we have valid ones to add
+        // IDEMPOTENCY FIX: Remove EVERYTHING in the range that isn't a "Good Original".
+        // A "Good Original" has NO engine property and NO mismatch.
+        // This ensures the new repair replaces ANY previous attempts (failed or successful).
         currentSegments = currentSegments.filter(s =>
-          (s.end_time <= range.start || s.start_time >= range.end) || !s.mismatch
+          (s.end_time <= range.start || s.start_time >= range.end) || (!s.mismatch && !s.engine)
         );
         currentMismatches = currentMismatches.filter(m =>
           m.end_time <= range.start || m.start_time >= range.end
@@ -261,6 +288,7 @@ export async function repairTranscription(
 
         currentSegments.push(...passed);
         repairEntry.status = "success";
+        repairEntry.newSegments = passed;
         console.log(`     [${range.start.toFixed(1)}s] Repair successful: ${passed.length} new valid segments added.`);
       } else {
         repairEntry.status = "failed";
@@ -321,8 +349,10 @@ export function applySurgicalRepair(
     }
 
     if (toAdd.length > 0) {
+      // Filter out mismatches AND previous repairs (any segment with engine property)
+      // to ensure the newly applied cached repair is the only thing for this range.
       currentSegments = currentSegments.filter(s =>
-        (s.end_time <= range.start || s.start_time >= range.end) || !s.mismatch
+        (s.end_time <= range.start || s.start_time >= range.end) || (!s.mismatch && !s.engine)
       );
       currentMismatches = currentMismatches.filter(m =>
         m.end_time <= range.start || m.start_time >= range.end

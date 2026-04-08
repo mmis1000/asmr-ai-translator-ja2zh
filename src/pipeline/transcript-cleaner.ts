@@ -494,14 +494,14 @@ function identifyRepairRanges(
   const merged: TimeRange[] = [];
   let current = { ...rawRanges[0]! };
   const PADDING = 2.0; // 2s padding for context
-  const MAX_RANGE_DURATION = 60.0; // Prevent huge repair ranges
-  const MAX_MERGE_GAP = 5.0; // Be more selective with merging
+  const MAX_RANGE_DURATION = 90.0; // Increased to be less likely to split awkwardly
+  const MAX_MERGE_GAP = 8.0; // Be slightly more inclusive with merging
 
   for (let i = 1; i < rawRanges.length; i++) {
     const next = rawRanges[i]!;
     const wouldBeDuration = next.end - current.start;
 
-    // If gaps are small (< 5s) AND the range doesn't get too long, merge them
+    // If gaps are small (< 8s) AND the range doesn't get too long, merge them
     if (next.start <= current.end + MAX_MERGE_GAP && wouldBeDuration <= MAX_RANGE_DURATION) {
       current.end = Math.max(current.end, next.end);
       if (!current.reason.includes(next.reason)) current.reason += `+${next.reason}`;

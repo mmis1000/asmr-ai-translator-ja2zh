@@ -128,6 +128,32 @@ Without `--meta-model` / `--meta-server-url`, `--dlsite` still scrapes DLSite fo
 uv run visualize_pipeline.py <output-dir> [track-stem-filter]
 ```
 
+## Repair engine comparison (MMS vs Qwen)
+
+Tested on 8 tracks from the same work.
+
+| Metric | `--mms-repair` | `--qwen-repair` |
+|--------|---------------|----------------|
+| Kanji / vocabulary accuracy | Worse — outputs phonetic kana where kanji expected | Better — correctly produces kanji (e.g. 監禁 vs かんきん) |
+| Avg segment duration | Consistent ~3 s | More variable; collapses to ~5 s on long tracks |
+| Translation tone | Missing `~` / formal feel | Preserves playful speech register with `~` |
+| Translation on garbled input | Over-generates (long fabricated runs) | Stays shorter / safer |
+| Noise section handling | Small garbage segments | Long merged hallucinations (20–43 s) |
+| Long-track stability | Good | Degrades badly toward the end of long tracks |
+
+**MMS-specific issues observed:**
+- Can produce a long garbled segment over non-speech/noise sections due to CTC misalignment (e.g. 21-second segment at track start)
+- Occasional foreign-script leakage (Turkish `ş`, Polish `ę`, German words)
+- Phonetic kana instead of kanji causes cascading translation errors (e.g. `かんきん` → `金金` instead of `監禁`)
+- Translator over-generates wildly when fed garbled input (a short phrase expands to a paragraph of repeated text)
+
+**Qwen-specific issues observed:**
+- Degrades severely toward the end of long tracks — produces repetitive filler sounds and English nonsense tokens
+- Creates very long segments (20–43 s) that merge multiple utterances
+- One mistranslation from ambiguous kanji: `自己室` → `自慰室` (masturbation room) instead of "own room"
+
+**Bottom line:** Qwen repair produces better vocabulary and more natural-sounding translations for clear speech. MMS repair is more stable for difficult/noisy sections and long tracks. Neither is dominant — Qwen wins on clean speech, MMS wins on robustness.
+
 ## Metadata JSON format
 
 User-supplied metadata (`--metadata`) should follow this shape:

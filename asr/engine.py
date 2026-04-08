@@ -268,12 +268,75 @@ class MMSEngine:
                 with torch.no_grad():
                     logits = self.model(**inputs).logits
                 
+                # Get character-level timestamps from MMS CTC alignment
                 ids = torch.argmax(logits, dim=-1)[0]
-                text = self.processor.decode(ids).strip()
+                outputs = self.processor.decode(ids, output_char_offsets=True)
+                text = outputs.text
+                char_offsets = outputs.char_offsets
                 
                 print(f"     MMS Result: \"{text}\"", flush=True)
 
-                if text:
+                if text and char_offsets:
+                    # Current segments in this cluster (may be split by gaps)
+                    cluster_segments = []
+                    current_text = []
+                    current_chars = []
+                    
+                    # Group chars into segments based on a gap threshold (e.g. 0.8s)
+                    # Wav2Vec2 frame duration = 0.02s (16000Hz / 320 stride)
+                    GAP_THRESHOLD = 0.8 / 0.02 # 40 frames
+                    
+                    for k, item in enumerate(char_offsets):
+                        c = item["char"]
+                        s_off = int(item["start_offset"])
+                        e_off = int(item["end_offset"])
+                        
+                        # New segment if gap is too large
+                        if current_chars and (s_off - current_chars[-1]["end_offset"]) > GAP_THRESHOLD:
+                            # Finalize previous segment
+                            seg_start = start + current_chars[0]["start_offset"] * 0.02
+                            seg_end = start + current_chars[-1]["end_offset"] * 0.02
+                            cluster_segments.append({
+                                "text": "".join(current_text).strip(),
+                                "start_time": round(seg_start, 3),
+                                "end_time": round(seg_end, 3),
+                                "words": current_chars,
+                                "avg_logprob": 0.0,
+                                "compression_ratio": 0.0,
+                                "no_speech_prob": 0.0,
+                                "engine": "mms"
+                            })
+                            current_text = []
+                            current_chars = []
+                        
+                        current_text.append(c)
+                        current_chars.append({
+                            "text": c,
+                            "start_time": round(start + s_off * 0.02, 3),
+                            "end_time": round(start + e_off * 0.02, 3),
+                            "start_offset": s_off,
+                            "end_offset": e_off
+                        })
+                        
+                    # Add trailing segment
+                    if current_text:
+                        seg_start = start + current_chars[0]["start_offset"] * 0.02
+                        seg_end = start + current_chars[-1]["end_offset"] * 0.02
+                        cluster_segments.append({
+                            "text": "".join(current_text).strip(),
+                            "start_time": round(seg_start, 3),
+                            "end_time": round(seg_end, 3),
+                            "words": current_chars,
+                            "avg_logprob": 0.0,
+                            "compression_ratio": 0.0,
+                            "no_speech_prob": 0.0,
+                            "engine": "mms"
+                        })
+                    
+                    full_texts.append(" ".join([s["text"] for s in cluster_segments]))
+                    all_segments.extend(cluster_segments)
+                elif text:
+                    # Fallback if no offsets (unlikely)
                     full_texts.append(text)
                     all_segments.append({
                         "text": text,

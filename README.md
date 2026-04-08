@@ -31,8 +31,65 @@ This downloads the CTranslate2 ROCm wheel, syncs the main venv (`asr/.venv`), an
 
 ## Usage
 
-```
+**Basic Command**
+```bash
 npx asmr-translator --input <dir> --output <dir> --model <path> [options]
+```
+
+### Suggested Settings (Full Pipeline)
+
+For a complete run using Qwen for echo translation, Unsloth Qwen for metadata gathering, DLSite parsing, and Python Whisper with vocal repair, use the following:
+
+```powershell
+npm run start -- `
+  --input "<dir>" `
+  --output "<dir>" `
+  --hf-repo "mmis1000/asmr-qwen3.5-9b-zh-tw-echo-gguf-v0.1:Q8_0" `
+  --meta-hf-repo "unsloth/Qwen3.5-9B-GGUF:UD-Q6_K_XL" `
+  --dlsite "RJxxxxxx" `
+  --llama-server "<path-to-llama-server.exe>" `
+  --asr python `
+  --lang zh-tw `
+  --repair-with-vocal `
+  --mode echo
+```
+
+### Suggested Settings (No DLSite metadata)
+
+If you do not have a DLSite ID for your work, you can create a generic metadata JSON file (e.g. `generic-meta.json`):
+
+```json
+{
+  "asr": {
+    "prompt": "シチュエーション音声"
+  },
+  "translate": {
+    "title": "",
+    "summary": "",
+    "cv_mapping": [],
+    "character_mapping": [],
+    "term_mapping": []
+  }
+}
+```
+
+### Suggested Settings (Manual Metadata Entry)
+
+If you know the work's details (such as character names, glossary terms, and titles) but do not have a DLSite ID to scrape them automatically, you can manually construct a populated `metadata.json` file. Please refer to the [Metadata JSON format](#metadata-json-format) section at the bottom of this page for the exact structure and examples on how to fill it out.
+
+Whether using an empty generic file or a manually filled one, run the translator with the `--metadata` flag instead of `--dlsite`:
+
+```powershell
+npm run start -- `
+  --input "<dir>" `
+  --output "<dir>" `
+  --hf-repo "mmis1000/asmr-qwen3.5-9b-zh-tw-echo-gguf-v0.1:Q8_0" `
+  --metadata "generic-meta.json" `
+  --llama-server "<path-to-llama-server.exe>" `
+  --asr python `
+  --lang zh-tw `
+  --repair-with-vocal `
+  --mode echo
 ```
 
 ### Required
@@ -157,12 +214,21 @@ User-supplied metadata (`--metadata`) should follow this shape:
 
 ```json
 {
-  "title": "Work Title",
-  "summary": "Japanese summary or description for ASR prompt context",
-  "glossary": {
-    "cvs":        [{ "ja": "涼花みなせ", "zh": "涼花皆瀨" }],
-    "characters": [{ "ja": "お姉ちゃん", "zh": "姊姊" }],
-    "terms":      [{ "ja": "耳かき", "zh": "掏耳朵" }]
+  "asr": {
+    "prompt": "囁き声、耳舐め、シチュエーション音声など、ASRエンジンへのヒントとなるキーワード"
+  },
+  "translate": {
+    "title": "作品のタイトル / 作品標題",
+    "summary": "シナリオの要約や状況設定など / 情境設定摘要",
+    "cv_mapping": [
+      { "ja": "声優の名前", "zh": "配音員中文名" }
+    ],
+    "character_mapping": [
+      { "ja": "お姉ちゃん", "zh": "姊姊" }
+    ],
+    "term_mapping": [
+      { "ja": "耳舐め", "zh": "舔耳" }
+    ]
   }
 }
 ```

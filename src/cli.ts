@@ -74,10 +74,7 @@ ASR:
   --min-hallucination <n>  Min text length to filter (default: 20)
   --repair-with-vocal      Use Demucs vocal stem for repair pass (forces --save-audio)
   --save-audio             Save separated audio stems for debugging
-  --mms-repair             Enable MMS ASR as a fallback during surgical repair
-  --qwen-repair            Enable Qwen-ASR as a fallback during surgical repair
-  --sensevoice-repair      Enable SenseVoice-ASR as a fallback during surgical repair
-  --gemma-repair           Enable Gemma-ASR as a fallback during surgical repair
+  --repair-engine <engine> ASR engine to use for surgical repair: whisper, mms, qwen, sensevoice, gemma (default: qwen)
   --asr-engine <engine>    ASR engine to use: whisper, mms, qwen, sensevoice, gemma (default: whisper)
   --save-repair-audio      Save audio fragments used for surgical repairs to a dedicated directory
 
@@ -127,10 +124,7 @@ function parseCliArgs(): TranslatorConfig {
       "repair-with-vocal": { type: "boolean" },
       "save-audio": { type: "boolean" },
       "repair-large-v3": { type: "boolean" },
-      "mms-repair":      { type: "boolean" },
-      "qwen-repair":     { type: "boolean" },
-      "sensevoice-repair": { type: "boolean" },
-      "gemma-repair":      { type: "boolean" },
+      "repair-engine":   { type: "string" },
       "asr-engine":      { type: "string" },
       "save-repair-audio": { type: "boolean" },
       help:              { type: "boolean", short: "h" },
@@ -169,6 +163,11 @@ function parseCliArgs(): TranslatorConfig {
   const asrEngine = values["asr-engine"] as "whisper" | "mms" | "qwen" | "sensevoice" | "gemma" | undefined;
   if (asrEngine && !["whisper", "mms", "qwen", "sensevoice", "gemma"].includes(asrEngine)) {
     console.error("Error: --asr-engine must be 'whisper', 'mms', 'qwen', 'sensevoice', or 'gemma'"); process.exit(1);
+  }
+
+  const repairEngine = values["repair-engine"] as "whisper" | "mms" | "qwen" | "sensevoice" | "gemma" | undefined;
+  if (repairEngine && !["whisper", "mms", "qwen", "sensevoice", "gemma"].includes(repairEngine)) {
+    console.error("Error: --repair-engine must be 'whisper', 'mms', 'qwen', 'sensevoice', or 'gemma'"); process.exit(1);
   }
 
   const gpuLayersRaw = values["gpu-layers"];
@@ -216,10 +215,7 @@ function parseCliArgs(): TranslatorConfig {
     mixWeight:         values["mix-weight"] ? parseFloat(values["mix-weight"] as string) : DEFAULT_CONFIG.mixWeight,
     saveAudioStems:    ((values["repair-with-vocal"] as boolean) ?? DEFAULT_CONFIG.repairWithVocal) ? true : ((values["save-audio"] as boolean) ?? DEFAULT_CONFIG.saveAudioStems),
     repairLargeV3:     (values["repair-large-v3"] as boolean)   ?? DEFAULT_CONFIG.repairLargeV3,
-    useMmsRepair:      (values["mms-repair"] as boolean)        ?? DEFAULT_CONFIG.useMmsRepair,
-    useQwenRepair:     (values["qwen-repair"] as boolean)       ?? DEFAULT_CONFIG.useQwenRepair,
-    useSenseVoiceRepair: (values["sensevoice-repair"] as boolean) ?? DEFAULT_CONFIG.useSenseVoiceRepair,
-    useGemmaRepair:      (values["gemma-repair"] as boolean)      ?? DEFAULT_CONFIG.useGemmaRepair,
+    repairEngine:      repairEngine                ?? DEFAULT_CONFIG.repairEngine,
     asrEngine:         asrEngine                   ?? DEFAULT_CONFIG.asrEngine,
     saveRepairAudio:   (values["save-repair-audio"] as boolean) ?? DEFAULT_CONFIG.saveRepairAudio,
   };
@@ -510,10 +506,7 @@ async function main() {
           repairWithVocal: config.repairWithVocal,
           mixWeight: config.mixWeight,
           asrPrompt: asrPrompt || undefined,
-          useMmsRepair: config.useMmsRepair,
-          useQwenRepair: config.useQwenRepair,
-          useSenseVoiceRepair: config.useSenseVoiceRepair,
-          useGemmaRepair: config.useGemmaRepair,
+          repairEngine: config.repairEngine,
           saveRepairAudio: config.saveRepairAudio,
         },
         surgicalLog,

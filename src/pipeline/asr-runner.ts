@@ -96,10 +96,6 @@ export async function getTranscription(
     demucsScript?: string | undefined;
     asrPrompt?: string | undefined;
     saveAudioStems?: boolean;
-    useMmsRepair?: boolean;
-    useQwenRepair?: boolean;
-    useSenseVoiceRepair?: boolean;
-    useGemmaRepair?: boolean;
   },
 ): Promise<TranscriptFile | null> {
   if (options.asrMode === "skip") {

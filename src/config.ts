@@ -60,10 +60,7 @@ export interface TranslatorConfig {
   saveAudio: boolean;
   repairLargeV3: boolean;
   saveAudioStems: boolean;
-  useMmsRepair: boolean;
-  useQwenRepair: boolean;
-  useSenseVoiceRepair: boolean;
-  useGemmaRepair: boolean;
+  repairEngine: "whisper" | "mms" | "qwen" | "sensevoice" | "gemma";
   saveRepairAudio: boolean;
 
   // Paths
@@ -111,10 +108,7 @@ export const DEFAULT_CONFIG: Omit<TranslatorConfig,
   mixWeight: 0.07,
   repairLargeV3: false,
   saveAudioStems: false,
-  useMmsRepair: false,
-  useQwenRepair: false,
-  useSenseVoiceRepair: false,
-  useGemmaRepair: false,
+  repairEngine: "qwen",
   saveRepairAudio: false,
   debugLog:       false,
 };

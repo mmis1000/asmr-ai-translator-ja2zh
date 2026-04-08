@@ -89,10 +89,7 @@ Without `--meta-model` / `--meta-server-url`, `--dlsite` still scrapes DLSite fo
 | `--asr-engine <engine>` | Engine: `whisper`, `mms`, `qwen`, `sensevoice`, `gemma` (default: `whisper`) |
 | `--python-exe <path>` | Python executable (default: `asr/.venv/Scripts/python.exe`) |
 | `--repair-with-vocal` | Use Demucs vocal stem for the repair pass |
-| `--mms-repair` | Enable MMS ASR as a surgical repair fallback |
-| `--qwen-repair` | Enable Qwen ASR as a surgical repair fallback |
-| `--sensevoice-repair` | Enable SenseVoice ASR as a surgical repair fallback |
-| `--gemma-repair` | Enable Gemma ASR as a surgical repair fallback |
+| `--repair-engine <engine>` | Surgical repair engine: `whisper`, `mms`, `qwen`, `sensevoice`, `gemma` (default: `qwen`) |
 | `--save-repair-audio` | Save audio fragments used for surgical repairs |
 | `--vocal-threshold <n>` | Vocal energy threshold (default: 0.001) |
 | `--snr-threshold <n>` | SNR dB threshold (default: 2.0) |
@@ -132,7 +129,7 @@ uv run visualize_pipeline.py <output-dir> [track-stem-filter]
 
 Tested on 8 tracks from the same work.
 
-| Metric | `--mms-repair` | `--qwen-repair` |
+| Metric | `--repair-engine mms` | `--repair-engine qwen` |
 |--------|---------------|----------------|
 | Kanji / vocabulary accuracy | Worse — outputs phonetic kana where kanji expected | Better — correctly produces kanji (e.g. 監禁 vs かんきん) |
 | Avg segment duration | Consistent ~3 s | More variable; collapses to ~5 s on long tracks |

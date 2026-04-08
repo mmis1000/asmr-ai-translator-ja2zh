@@ -25,10 +25,7 @@ interface RepairOptions {
   repairWithVocal: boolean;
   mixWeight: number; // Weight for mixing original audio back into vocals
   asrPrompt?: string | undefined;
-  useMmsRepair?: boolean;
-  useQwenRepair?: boolean;
-  useSenseVoiceRepair?: boolean;
-  useGemmaRepair?: boolean;
+  repairEngine: "whisper" | "mms" | "qwen" | "sensevoice" | "gemma";
   saveRepairAudio: boolean;
 }
 
@@ -94,12 +91,7 @@ export async function repairTranscription(
   const tempDir = vocalPath ? path.dirname(path.dirname(vocalPath)) : path.dirname(audioPath);
 
   // Determine which engine to use (one engine per repair pass)
-  const engineType: "whisper" | "mms" | "qwen" | "sensevoice" | "gemma" =
-    options.useQwenRepair ? "qwen"
-    : options.useMmsRepair ? "mms"
-    : options.useSenseVoiceRepair ? "sensevoice"
-    : options.useGemmaRepair ? "gemma"
-    : "whisper";
+  const engineType: "whisper" | "mms" | "qwen" | "sensevoice" | "gemma" = options.repairEngine;
 
   console.log(`  -> Engine: ${engineType} | Batching ${windowsToRepair.length} window(s) into one call...`);
 
@@ -131,7 +123,7 @@ export async function repairTranscription(
     const mismatchesInRange = initialMismatches.filter(m =>
       m.start_time >= range.start && m.end_time <= range.end
     );
-    const rangeArgs = options.useMmsRepair
+    const rangeArgs = options.repairEngine === "mms"
       ? getSpeechClusters(windows, range, options.vocalThreshold, options.snrThreshold)
       : [range];
     return { range, rangeArgs, originalInRange, mismatchesInRange };
@@ -143,7 +135,7 @@ export async function repairTranscription(
     job.mismatchesInRange.forEach(m => {
       console.log(`     - [${m.mismatch?.type}] ${m.mismatch?.reason}`);
     });
-    if (options.useMmsRepair) {
+    if (options.repairEngine === "mms") {
       console.log(`     - ${job.rangeArgs.length} MMS cluster(s)`);
     }
   }
@@ -199,7 +191,7 @@ export async function repairTranscription(
     }
 
     let newSegments: TranscriptSegment[];
-    if (options.useMmsRepair) {
+    if (options.repairEngine === "mms") {
       // MMS: one combined result for all clusters; filter to this window's range
       const mmsResult = windowResults[0];
       newSegments = (mmsResult?.segments ?? []).filter(

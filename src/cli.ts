@@ -482,7 +482,7 @@ async function main() {
 
     let surgicalLog: any[] = cachedLog || [];
 
-    if (finalRepairRanges.length > 0) {
+    if (!cachedLog && finalRepairRanges.length > 0) {
       const vocalPath = path.join(config.outputDir, track.relativeDir, "demucs_output", `${track.stem}.vocals.wav`);
 
       const repaired = await repairTranscription(

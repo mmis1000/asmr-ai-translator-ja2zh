@@ -33,7 +33,7 @@ This downloads the CTranslate2 ROCm wheel, syncs the main venv (`asr/.venv`), an
 
 **Basic Command**
 ```bash
-npx asmr-translator --input <dir> --output <dir> --model <path> [options]
+npm run start -- --input <dir> --output <dir> --model <path> [options]
 ```
 
 ### Suggested Settings (Full Pipeline)

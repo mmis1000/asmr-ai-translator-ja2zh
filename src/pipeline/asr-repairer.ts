@@ -58,19 +58,9 @@ export async function repairTranscription(
   mismatches: TranscriptSegment[];
   surgicalLog: SurgicalRepairEntry[];
 }> {
-  // Identify windows that actually need a NEW repair (not already in existingLog)
-  const windowsToRepair = repairRanges.filter(range => {
-    const cached = existingLog.find(e => 
-      Math.abs(e.range.start - range.start) < 1.0 && 
-      Math.abs(e.range.end - range.end) < 1.0 &&
-      e.status === "success"
-    );
-    if (cached) {
-      console.log(`  -> Skipping already repaired window [${range.start.toFixed(1)}s - ${range.end.toFixed(1)}s]`);
-      return false;
-    }
-    return true;
-  });
+  // Merge overlapping/adjacent repair ranges before sending to the ASR engine
+  // so we never dispatch duplicate or overlapping windows in the same pass.
+  const windowsToRepair = mergeRanges(repairRanges);
 
   if (windowsToRepair.length === 0) {
     return { 
@@ -422,6 +412,28 @@ function getSpeechClusters(
     
     return { start, end, reason: "mms_cluster" };
   });
+}
+
+/**
+ * Merges overlapping or adjacent TimeRanges into the minimal set of
+ * non-overlapping ranges, preserving a combined reason string.
+ */
+function mergeRanges(ranges: TimeRange[]): TimeRange[] {
+  if (ranges.length === 0) return [];
+  const sorted = [...ranges].sort((a, b) => a.start - b.start);
+  const merged: TimeRange[] = [{ ...sorted[0]! }];
+  for (let i = 1; i < sorted.length; i++) {
+    const cur = merged[merged.length - 1]!;
+    const next = sorted[i]!;
+    if (next.start <= cur.end) {
+      // Overlapping — extend current range
+      cur.end = Math.max(cur.end, next.end);
+      if (!cur.reason.includes(next.reason)) cur.reason += `+${next.reason}`;
+    } else {
+      merged.push({ ...next });
+    }
+  }
+  return merged;
 }
 
 type WindowResult = {

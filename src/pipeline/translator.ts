@@ -17,6 +17,13 @@ const MAX_RETRIES = 3;
 const COLLAPSE_MIN_LEN = 5;
 /** Number of consecutive entries with identical text before declaring collapse. */
 const COLLAPSE_THRESHOLD = 3;
+/**
+ * Above this length a sentence is considered "long and complex". Even 2
+ * distinct inputs mapping to the same output is almost certainly a collapse.
+ */
+const COLLAPSE_LONG_LEN = 15;
+/** Stricter threshold applied to long/complex outputs. */
+const COLLAPSE_LONG_THRESHOLD = 2;
 
 /**
  * CJK-only name (1–10 chars) followed by a full-width or half-width colon.
@@ -122,7 +129,8 @@ export function detectAttentionCollapse(entries: TranslationEntry[], segments: S
     }
     inputSet.add(inputText);
 
-    if (inputSet.size >= COLLAPSE_THRESHOLD) {
+    const threshold = outputText.length > COLLAPSE_LONG_LEN ? COLLAPSE_LONG_THRESHOLD : COLLAPSE_THRESHOLD;
+    if (inputSet.size >= threshold) {
       throw new Error(
         `Attention collapse detected: "${outputText.slice(0, 40)}…" produced for ${inputSet.size} distinct inputs`,
       );

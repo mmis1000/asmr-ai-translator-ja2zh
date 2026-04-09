@@ -6,8 +6,6 @@ const IM_S = "<|im_start|>";
 const IM_E = "<|im_end|>";
 const STOP = ["<|im_end|>", "<|endoftext|>"];
 
-/** Default per-request timeout (5 minutes). */
-const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 
 export function buildChatPrompt(user: string): string {
   return `${IM_S}user\n${user}${IM_E}\n${IM_S}assistant\n<think></think>\n`;
@@ -71,33 +69,10 @@ export class LlmClient {
       grammar?: string | undefined;
       temperature?: number | undefined;
       nPredict?: number | undefined;
-      timeoutMs?: number | undefined;
       /** Fixed RNG seed for reproducible outputs. Omit for random (default). */
       seed?: number | undefined;
       label?: string | undefined;
     },
-  ): Promise<string> {
-    const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-      return await this._doComplete(prompt, options, controller.signal);
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-
-  private async _doComplete(
-    prompt: string,
-    options: {
-      grammar?: string | undefined;
-      temperature?: number | undefined;
-      nPredict?: number | undefined;
-      seed?: number | undefined;
-      label?: string | undefined;
-    } | undefined,
-    signal: AbortSignal,
   ): Promise<string> {
     const body = {
       prompt,
@@ -119,12 +94,8 @@ export class LlmClient {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
-        signal,
       });
     } catch (err: any) {
-      if (err.name === "AbortError") {
-        throw new Error("LLM request timed out");
-      }
       const cause = err.cause
         ? ` (Cause: ${err.cause.message || err.cause.code || String(err.cause)})`
         : "";
@@ -142,28 +113,21 @@ export class LlmClient {
     let rawContent = "";
     let buffer = "";
 
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          const dataStr = line.slice(6).trim();
-          if (!dataStr || dataStr === "[DONE]") continue;
-          try {
-            const data = JSON.parse(dataStr);
-            if (data.content) rawContent += data.content;
-          } catch { /* ignore malformed SSE */ }
-        }
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const dataStr = line.slice(6).trim();
+        if (!dataStr || dataStr === "[DONE]") continue;
+        try {
+          const data = JSON.parse(dataStr);
+          if (data.content) rawContent += data.content;
+        } catch { /* ignore malformed SSE */ }
       }
-    } catch (err: any) {
-      if (err.name === "AbortError") {
-        throw new Error(`LLM request timed out (received ${rawContent.length} chars before timeout)`);
-      }
-      throw err;
     }
 
     if (!rawContent) {

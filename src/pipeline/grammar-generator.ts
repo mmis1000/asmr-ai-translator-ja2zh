@@ -53,29 +53,40 @@ export function generateTranslationGrammar(
       const ids = mergedSegs.map((s) => s.id);
       const start = mergedSegs[0]!.start;
       const end = mergedSegs[mergedSegs.length - 1]!.end;
-      const idsJson = "[" + ids.join(", ") + "]";
+      
+      const gStr = (s: string) => makeGbnfStringLiteral(s);
+      const wsToken = (tok: string) => `${gStr(tok)} ws`;
 
-      // Build the hardcoded prefix up to (but not including) the text value.
-      // Echo mode: include the "input" field as a free text-value (not a
-      // hardcoded literal). Embedding the Japanese input text as a GBNF
-      // literal causes grammar parse failures in llama.cpp for long/complex
-      // Unicode strings; the echo model is trained to output the correct
-      // Echo mode
+      const gIds = ids.map(id => gStr(id.toString())).join(` ${wsToken(",")} `);
+      const idsGbnf = `${wsToken("[")} ${gIds} ws ${gStr("]")}`;
+
+      const keyIds = wsToken('"ids"');
+      const keyInput = wsToken('"input"');
+      const keyText = wsToken('"text"');
+      const keyStart = wsToken('"start"');
+      const keyEnd = wsToken('"end"');
+      const colon = wsToken(":");
+      const comma = wsToken(",");
+
       let entry: string;
       if (mode === "base") {
-        const prefix = `{"ids": ${idsJson}, "text": `;
-        const suffix = `, "start": ${start}, "end": ${end}}`;
-        entry = `(${makeGbnfStringLiteral(prefix)} text-value ${makeGbnfStringLiteral(suffix)})`;
+        entry = `( ${gStr("{")} ws ${keyIds} ${colon} ${idsGbnf} ws ` +
+                `${comma} ${keyText} ${colon} text-value ws ` +
+                `${comma} ${keyStart} ${colon} ${gStr(start.toString())} ws ` +
+                `${comma} ${keyEnd} ${colon} ${gStr(end.toString())} ws ${gStr("}")} )`;
       } else {
-        const inputText = mergedSegs.map((s) => s.text).join("");
-        const prefix = `{"ids": ${idsJson}, "input": ${JSON.stringify(inputText)}, "text": `;
-        const suffix = `, "start": ${start}, "end": ${end}}`;
-        entry = `(${makeGbnfStringLiteral(prefix)} text-value ${makeGbnfStringLiteral(suffix)})`;
+        const inputText = mergedSegs.map((s) => s.text).join(" ");
+        const inputLit = gStr(JSON.stringify(inputText));
+        entry = `( ${gStr("{")} ws ${keyIds} ${colon} ${idsGbnf} ws ` +
+                `${comma} ${keyInput} ${colon} ${inputLit} ws ` +
+                `${comma} ${keyText} ${colon} text-value ws ` +
+                `${comma} ${keyStart} ${colon} ${gStr(start.toString())} ws ` +
+                `${comma} ${keyEnd} ${colon} ${gStr(end.toString())} ws ${gStr("}")} )`;
       }
 
       const hasNext = i + mergeLen < n;
       if (hasNext) {
-        alternatives.push(`(${entry} "," ws s${i + mergeLen + 1})`);
+        alternatives.push(`(${entry} ws ${gStr(",")} ws s${i + mergeLen + 1})`);
       } else {
         alternatives.push(entry);
       }

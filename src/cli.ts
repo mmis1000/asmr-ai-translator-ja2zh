@@ -3,12 +3,17 @@
 import fs from "fs/promises";
 import path from "path";
 import { parseArgs } from "node:util";
-import { type TranslatorConfig, DEFAULT_CONFIG } from "./config.js";
+import { type TranslatorConfig, DEFAULT_CONFIG, ASR_PROJECT_ROOT } from "./config.js";
 import { LlamaServerManager } from "./server/llama-server-manager.js";
 import { LlmClient } from "./server/llm-client.js";
 import { cleanTranscript } from "./pipeline/transcript-cleaner.js";
 import { getTranscription } from "./pipeline/asr-runner.js";
 import { fetchDlsiteMetadata, parseDlsiteId } from "./pipeline/fetch-metadata.js";
+import {
+  downloadYtdlpAudio,
+  fetchYtdlpMetadata,
+  type YtdlpMetadata,
+} from "./pipeline/ytdlp-runner.js";
 import { MetadataExtractor } from "./pipeline/metadata-extractor.js";
 import {  repairTranscription,
   applySurgicalRepair,
@@ -42,10 +47,11 @@ Required:
 
 Metadata (optional, pick one):
   --dlsite <id|url>        DLSite work ID or URL — scrapes metadata for context
+  --ytdlp <url>            Download audio into --input via yt-dlp and scrape page metadata
   --metadata <file>        User-supplied metadata JSON
 
 Metadata extraction (requires a general-purpose model, NOT the translation model):
-  --meta-model <path>      GGUF model for metadata extraction (used with --dlsite)
+  --meta-model <path>      GGUF model for metadata extraction (used with --dlsite / --ytdlp)
   --meta-hf-repo <repo>    HuggingFace repo for metadata model ("user/model[:quant]" or full HF URL)
   --meta-server-url <url>  External server URL for metadata extraction
   --meta-ctx-size <number> Context size for metadata model (default: 16384)
@@ -78,9 +84,13 @@ ASR:
   --asr-engine <engine>    ASR engine to use: whisper, mms, qwen, sensevoice, gemma (default: whisper)
   --save-repair-audio      Save audio fragments used for surgical repairs to a dedicated directory
 
-Note: --dlsite with LLM extraction requires --meta-model or --meta-server-url.
-      Without these, --dlsite still scrapes DLSite for basic metadata (title, VA,
-      description) but won't produce a structured glossary.
+yt-dlp (requires uv; uses translator/asr pyproject + uv.lock):
+  --uv-exe <path>          uv executable (default: uv in PATH)
+  --ytdlp-audio-format <f> Audio format for extraction (default: best — native best audio)
+
+Note: --dlsite / --ytdlp with LLM extraction requires --meta-model, --meta-hf-repo,
+      or --meta-server-url. Without these, basic scraped metadata is still used
+      (no structured glossary from the LLM).
   `);
 }
 
@@ -92,7 +102,10 @@ function parseCliArgs(): TranslatorConfig {
       model:             { type: "string" },
       "hf-repo":         { type: "string" },
       dlsite:            { type: "string" },
+      ytdlp:             { type: "string" },
       metadata:          { type: "string" },
+      "uv-exe":          { type: "string" },
+      "ytdlp-audio-format": { type: "string" },
       "meta-model":      { type: "string" },
       "meta-hf-repo":    { type: "string" },
       "meta-server-url": { type: "string" },
@@ -139,6 +152,14 @@ function parseCliArgs(): TranslatorConfig {
 
   if (!values.input) { console.error("Error: --input is required"); printUsage(); process.exit(1); }
   if (!values.output) { console.error("Error: --output is required"); printUsage(); process.exit(1); }
+
+  const metadataSources = [values.dlsite, values.ytdlp, values.metadata].filter(Boolean);
+  if (metadataSources.length > 1) {
+    console.error("Error: use only one of --dlsite, --ytdlp, or --metadata");
+    printUsage();
+    process.exit(1);
+  }
+
   if (!values.model && !values["hf-repo"] && !values["server-url"]) {
     console.error("Error: --model or --hf-repo is required (unless --server-url is provided)");
     printUsage();
@@ -185,7 +206,11 @@ function parseCliArgs(): TranslatorConfig {
     modelPath: values.model ? path.resolve(values.model as string) : "",
     hfRepo: values["hf-repo"] ? parseHfRepo(values["hf-repo"] as string) : undefined,
     dlsiteId: values.dlsite as string | undefined,
+    ytdlpUrl: values.ytdlp as string | undefined,
     metadataFile: values.metadata ? path.resolve(values.metadata as string) : undefined,
+    uvExe: (values["uv-exe"] as string) ?? DEFAULT_CONFIG.uvExe,
+    ytdlpAudioFormat:
+      (values["ytdlp-audio-format"] as string) ?? DEFAULT_CONFIG.ytdlpAudioFormat,
     metaModelPath: values["meta-model"] ? path.resolve(values["meta-model"] as string) : undefined,
     metaHfRepo: values["meta-hf-repo"] ? parseHfRepo(values["meta-hf-repo"] as string) : undefined,
     metaServerUrl: values["meta-server-url"] as string | undefined,
@@ -229,7 +254,15 @@ function parseHfRepo(input: string): string {
 
 // ── Audio discovery ──────────────────────────────────────────────────────────
 
-const AUDIO_EXTS = new Set([".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac"]);
+const AUDIO_EXTS = new Set([
+  ".mp3",
+  ".wav",
+  ".flac",
+  ".m4a",
+  ".ogg",
+  ".opus",
+  ".aac",
+]);
 
 async function discoverAudioTracks(inputDir: string): Promise<AudioTrack[]> {
   const tracks: AudioTrack[] = [];
@@ -271,6 +304,30 @@ async function main() {
   console.log(`Mode:     ${config.mode}`);
   console.log(`ASR:      ${config.asrMode}`);
   console.log();
+
+  let ytdlpMeta: YtdlpMetadata | undefined;
+  if (config.ytdlpUrl) {
+    const dirEntries = await fs.readdir(config.inputDir).catch(() => []);
+    const infoFiles = dirEntries.filter((e) => e.endsWith(".info.json"));
+    if (infoFiles.length > 0) {
+      console.log(
+        `[yt-dlp] Audio already present in ${config.inputDir}, fetching metadata only`,
+      );
+      ytdlpMeta = await fetchYtdlpMetadata(
+        config.ytdlpUrl,
+        config.uvExe,
+        ASR_PROJECT_ROOT,
+      );
+    } else {
+      ytdlpMeta = await downloadYtdlpAudio(
+        config.ytdlpUrl,
+        config.inputDir,
+        config.uvExe,
+        ASR_PROJECT_ROOT,
+        config.ytdlpAudioFormat,
+      );
+    }
+  }
 
   // ── Step 1: Discover audio tracks ────────────────────────────────────────
 
@@ -375,6 +432,67 @@ async function main() {
           characters: [],
           terms: [],
           summary: dlsite.description ?? "",
+        };
+      }
+    }
+  } else if (config.ytdlpUrl && ytdlpMeta) {
+    if (await tryLoadCachedMetadata()) {
+      // Already extracted — skip re-running LLM
+    } else {
+      const hasMetaModel = config.metaModelPath || config.metaServerUrl || config.metaHfRepo;
+
+      if (ytdlpMeta.metadataMd && hasMetaModel) {
+        const fileList = tracks.map((t) => `- ${t.relativePath}`).join("\n");
+        const fullMd = ytdlpMeta.metadataMd + `\n# File List\n\n${fileList}\n`;
+
+        const metaServer = new LlamaServerManager(
+          {
+            llamaServerExe: config.llamaServerExe,
+            modelPath: config.metaModelPath ?? "",
+            hfRepo: config.metaHfRepo,
+            serverPort: config.metaServerPort,
+            gpuLayers: config.gpuLayers,
+            contextSize: config.metaContextSize,
+            parallel: 1,
+            serverUrl: config.metaServerUrl,
+          },
+          "MetaServer",
+        );
+
+        try {
+          await metaServer.start();
+          const metaClient = new LlmClient(metaServer.baseUrl, {
+            ...config,
+            temperature: config.metaTemperature,
+            repeatPenalty: 1.0,
+          });
+          const extractor = new MetadataExtractor(metaClient, config.locale, config.seed);
+          const result = await extractor.extract(fullMd);
+          glossary = result.glossary;
+          outputMetadata = result.metadata;
+        } finally {
+          await metaServer.stop();
+        }
+      } else if (ytdlpMeta.metadataMd) {
+        console.log(
+          `[Metadata] No --meta-model provided. Using yt-dlp scraped metadata only (no glossary extraction).`,
+        );
+        outputMetadata = {
+          title: ytdlpMeta.title,
+          summary: ytdlpMeta.description,
+          glossary: {
+            cvs: ytdlpMeta.uploader
+              ? [{ ja: ytdlpMeta.uploader, zh: ytdlpMeta.uploader }]
+              : [],
+            characters: [],
+            terms: [],
+          },
+        } satisfies UserMetadata;
+        glossary = {
+          cvs: (outputMetadata as UserMetadata).glossary?.cvs ?? [],
+          characters: [],
+          terms: [],
+          summary: ytdlpMeta.description ?? "",
         };
       }
     }

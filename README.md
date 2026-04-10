@@ -7,7 +7,7 @@ A CLI pipeline for transcribing and translating Japanese ASMR audio to Tradition
 ## Requirements
 
 - **Node.js** 20+, **npm** (for the TypeScript CLI)
-- **Python 3.12** + [uv](https://docs.astral.sh/uv/) (for the ASR subsystem)
+- **Python 3.12** + [uv](https://docs.astral.sh/uv/) (for the ASR subsystem and for `--ytdlp`, which runs `uv run --project translator/asr yt-dlp` using the locked dependency in `translator/asr/pyproject.toml`)
 - **llama-server** from [llama.cpp](https://github.com/ggerganov/llama.cpp) in `PATH` (or supply `--llama-server <path>`)
 - A fine-tuned translation GGUF model (see `--model` / `--hf-repo`)
 - **AMD GPU with ROCm 7.2** (Windows) — the ASR environment installs ROCm wheels automatically
@@ -29,7 +29,7 @@ cd translator/asr
 ./setup.ps1
 ```
 
-This downloads the CTranslate2 ROCm wheel, syncs the main venv (`asr/.venv`), and syncs the isolated Qwen venv (`asr/qwen_env/.venv`).
+This downloads the CTranslate2 ROCm wheel, syncs the main venv (`asr/.venv`), and syncs the isolated Qwen venv (`asr/qwen_env/.venv`). The same `translator/asr` environment includes `yt-dlp` (pinned in `uv.lock`) for `--ytdlp`.
 
 ## Usage
 
@@ -70,6 +70,24 @@ npm run start -- `
   --llama-server "<path-to-llama-server.exe>" `
   --asr python `
   --lang zh-cn `
+  --repair-with-vocal `
+  --mode echo
+```
+
+### Suggested Settings (yt-dlp source)
+
+Use when audio comes from a URL supported by yt-dlp. Ensure `uv` is on `PATH` and run `uv sync` once under `translator/asr` so `yt-dlp` matches `uv.lock`. Point `--input` at an **empty or dedicated folder**; the CLI downloads audio and writes `<id>.info.json` there, then discovers tracks.
+
+```powershell
+npm run start -- `
+  --input "<download-dir>" `
+  --output "<out-dir>" `
+  --hf-repo "mmis1000/asmr-qwen3.5-9b-zh-tw-echo-gguf-v0.1:Q8_0" `
+  --meta-hf-repo "unsloth/Qwen3.5-9B-GGUF:UD-Q6_K_XL" `
+  --ytdlp "https://www.youtube.com/watch?v=VIDEO_ID" `
+  --llama-server "<path-to-llama-server.exe>" `
+  --asr python `
+  --lang zh-tw `
   --repair-with-vocal `
   --mode echo
 ```
@@ -116,7 +134,7 @@ npm run start -- `
 
 | Flag | Description |
 |------|-------------|
-| `--input <dir>` | Directory of audio files (mp3, wav, flac, m4a, ogg, aac — searched recursively) |
+| `--input <dir>` | Directory of audio files (mp3, wav, flac, m4a, ogg, opus, aac — searched recursively) |
 | `--output <dir>` | Output directory (separate from input) |
 | `--model <path>` | Fine-tuned translation GGUF model |
 | `--hf-repo <repo>` | HuggingFace repo as alternative to `--model` (`user/model[:quant]` or full HF URL) |
@@ -125,18 +143,21 @@ One of `--model`, `--hf-repo`, or `--server-url` is required.
 
 ### Metadata (optional)
 
-Metadata provides a per-work glossary of character names, CV names, and terms that improves translation accuracy.
+Metadata provides a per-work glossary of character names, CV names, and terms that improves translation accuracy. Use **at most one** of `--dlsite`, `--ytdlp`, or `--metadata`.
 
 | Flag | Description |
 |------|-------------|
 | `--dlsite <id\|url>` | DLSite work ID or URL — scrapes metadata for context |
+| `--ytdlp <url>` | Download audio into `--input` with yt-dlp and scrape title/description/uploader/tags (requires `uv`; uses `translator/asr` lockfile) |
 | `--metadata <file>` | User-supplied metadata JSON |
-| `--meta-model <path>` | GGUF model for metadata extraction (used with `--dlsite`) |
+| `--meta-model <path>` | GGUF model for metadata extraction (used with `--dlsite` / `--ytdlp`) |
 | `--meta-hf-repo <repo>` | HuggingFace repo for metadata model |
 | `--meta-server-url <url>` | External server URL for metadata extraction |
 | `--meta-ctx-size <n>` | Context size for metadata model (default: 16384) |
+| `--uv-exe <path>` | `uv` executable for `--ytdlp` (default: `uv` in PATH) |
+| `--ytdlp-audio-format <f>` | Audio format for yt-dlp extract (default: `best` — native best audio) |
 
-Without `--meta-model` / `--meta-server-url`, `--dlsite` still scrapes DLSite for basic metadata (title, VA, description) but skips LLM glossary extraction.
+Without `--meta-model` / `--meta-hf-repo` / `--meta-server-url`, `--dlsite` / `--ytdlp` still use scraped metadata (title, VA/uploader, description) but skip LLM glossary extraction.
 
 ### Translation server
 
@@ -173,13 +194,14 @@ Without `--meta-model` / `--meta-server-url`, `--dlsite` still scrapes DLSite fo
 
 ## Pipeline overview
 
-1. **Audio discovery** — walks `--input` recursively for audio files
-2. **Metadata resolution** — DLSite scrape + optional LLM extraction, or user JSON
-3. **ASR transcription** — Whisper (or alternative engine) via Python subprocess
-4. **Transcript cleaning** — filters hallucinations, low-SNR segments, repetition loops
-5. **Surgical repair** — re-transcribes flagged windows with stricter settings; cached between runs
-6. **Translation** — windowed LLM translation with glossary injection
-7. **Output** — JSON transcription, JSON translation, SRT subtitles per track
+1. **Optional yt-dlp** — if `--ytdlp` is set, download audio (or skip download when `*.info.json` already exists in `--input`) before discovery
+2. **Audio discovery** — walks `--input` recursively for audio files
+3. **Metadata resolution** — DLSite or yt-dlp scrape + optional LLM extraction, or user JSON
+4. **ASR transcription** — Whisper (or alternative engine) via Python subprocess
+5. **Transcript cleaning** — filters hallucinations, low-SNR segments, repetition loops
+6. **Surgical repair** — re-transcribes flagged windows with stricter settings; cached between runs
+7. **Translation** — windowed LLM translation with glossary injection
+8. **Output** — JSON transcription, JSON translation, SRT subtitles per track
 
 ## Output structure
 

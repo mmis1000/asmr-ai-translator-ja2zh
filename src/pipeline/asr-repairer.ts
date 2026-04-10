@@ -2,6 +2,7 @@ import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { qwenVenvPythonPath } from "../config.js";
 import type { TranscriptSegment, TranscriptFile, DemucsWindow } from "../util/types.js";
 import type { TimeRange } from "./transcript-cleaner.js";
 import { isGarbled } from "./transcript-cleaner.js";
@@ -460,7 +461,7 @@ async function runSurgicalASR(
     let enginePythonExe = options.pythonExe;
     if (engine === "qwen") {
       const asrDir = path.dirname(asrScript);
-      const qwenVenvExe = path.join(asrDir, "qwen_env", ".venv", "Scripts", "python.exe");
+      const qwenVenvExe = qwenVenvPythonPath(asrDir);
       if (fs.existsSync(qwenVenvExe)) {
         enginePythonExe = qwenVenvExe;
       } else {

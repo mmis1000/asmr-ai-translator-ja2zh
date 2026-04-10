@@ -135,7 +135,15 @@ export interface FinalMetadata {
 
 // ── Audio file discovery ─────────────────────────────────────────────────────
 
-export const AUDIO_EXTENSIONS = [".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac"];
+export const AUDIO_EXTENSIONS = [
+  ".mp3",
+  ".wav",
+  ".flac",
+  ".m4a",
+  ".ogg",
+  ".opus",
+  ".aac",
+];
 
 export interface AudioTrack {
   /** Absolute path to the audio file */

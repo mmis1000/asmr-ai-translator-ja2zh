@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 import { spawn, type ChildProcess } from "child_process";
+import { qwenVenvPythonPath } from "../config.js";
 import type { TranscriptFile, AudioTrack, TranscriptSegment, DemucsWindow } from "../util/types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -171,7 +172,7 @@ export async function getTranscription(
     let enginePythonExe = options.pythonExe;
     if (options.asrEngine === "qwen") {
       const asrDir = path.dirname(asrScript);
-      const qwenVenvExe = path.join(asrDir, "qwen_env", ".venv", "Scripts", "python.exe");
+      const qwenVenvExe = qwenVenvPythonPath(asrDir);
       try {
         await fs.access(qwenVenvExe);
         enginePythonExe = qwenVenvExe;

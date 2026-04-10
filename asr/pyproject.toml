@@ -24,6 +24,7 @@ dependencies = [
     "accelerate",
     "funasr",
     "modelscope",
+    "yt-dlp>=2025.1.0",
 ]
 
 [tool.uv.sources]

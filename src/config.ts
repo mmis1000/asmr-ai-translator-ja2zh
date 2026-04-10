@@ -3,7 +3,21 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pythonSubPath = process.platform === "win32" ? ".venv/Scripts/python.exe" : ".venv/bin/python";
-const DEFAULT_ASR_PYTHON = path.resolve(__dirname, "../asr", pythonSubPath);
+/** Root of `translator/asr` (contains `pyproject.toml`, `uv.lock`, `.venv`). */
+export const ASR_PROJECT_ROOT = path.resolve(__dirname, "../asr");
+const DEFAULT_ASR_PYTHON = path.resolve(ASR_PROJECT_ROOT, pythonSubPath);
+
+/**
+ * Python for the isolated Qwen3-ASR venv (`qwen_env/.venv`, see `translator/asr/qwen_env/`).
+ * `asrProjectDir` is usually the folder containing `asr_cli.py` (defaults to `ASR_PROJECT_ROOT`).
+ */
+export function qwenVenvPythonPath(asrProjectDir: string): string {
+  const segments =
+    process.platform === "win32"
+      ? ["qwen_env", ".venv", "Scripts", "python.exe"]
+      : ["qwen_env", ".venv", "bin", "python"];
+  return path.join(asrProjectDir, ...segments);
+}
 
 export interface TranslatorConfig {
   // llama-server (translation model — fine-tuned)
@@ -68,6 +82,12 @@ export interface TranslatorConfig {
   outputDir: string;
   metadataFile?: string | undefined;
   dlsiteId?: string | undefined;
+  /** Video/audio URL for yt-dlp — downloads into `inputDir` and supplies metadata. */
+  ytdlpUrl?: string | undefined;
+  /** `uv` executable used to run `uv run --project … yt-dlp`. */
+  uvExe: string;
+  /** Passed to yt-dlp `-x` / `--audio-format` when not `"best"`. */
+  ytdlpAudioFormat: string;
 
   // Debug
   debugLog: boolean;
@@ -110,5 +130,7 @@ export const DEFAULT_CONFIG: Omit<TranslatorConfig,
   saveAudioStems: false,
   repairEngine: "qwen",
   saveRepairAudio: false,
+  uvExe:          "uv",
+  ytdlpAudioFormat: "best",
   debugLog:       false,
 };

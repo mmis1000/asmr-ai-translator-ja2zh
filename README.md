@@ -38,9 +38,9 @@ This downloads the CTranslate2 ROCm wheel, syncs the main venv (`asr/.venv`), an
 npm run start -- --input <dir> --output <dir> --model <path> [options]
 ```
 
-### Suggested Settings (Full Pipeline)
+### Suggested Settings (Full Pipeline, Traditional Chinese)
 
-For a complete run using Qwen for echo translation, Unsloth Qwen for metadata gathering, DLSite parsing, and Python Whisper with vocal repair, use the following:
+For a complete run using Qwen for echo translation into Traditional Chinese format, Unsloth Qwen for metadata gathering, DLSite parsing, and Python Whisper with vocal repair:
 
 ```powershell
 npm run start -- `
@@ -52,6 +52,24 @@ npm run start -- `
   --llama-server "<path-to-llama-server.exe>" `
   --asr python `
   --lang zh-tw `
+  --repair-with-vocal `
+  --mode echo
+```
+
+### Suggested Settings (Full Pipeline, Simplified Chinese)
+
+For Simplified Chinese output, use the `zh-cn` language flag and the corresponding Simplified Chinese model:
+
+```powershell
+npm run start -- `
+  --input "<dir>" `
+  --output "<dir>" `
+  --hf-repo "mmis1000/asmr-qwen3.5-9b-zh-cn-echo-gguf-v0.1:Q8_0" `
+  --meta-hf-repo "unsloth/Qwen3.5-9B-GGUF:UD-Q6_K_XL" `
+  --dlsite "RJxxxxxx" `
+  --llama-server "<path-to-llama-server.exe>" `
+  --asr python `
+  --lang zh-cn `
   --repair-with-vocal `
   --mode echo
 ```

@@ -46,7 +46,7 @@ export function generateTranslationGrammar(
     const stateNum = i + 1;
     const alternatives: string[] = [];
 
-    for (let mergeLen = 1; mergeLen <= 3; mergeLen++) {
+    for (let mergeLen = 1; mergeLen <= 5; mergeLen++) {
       if (i + mergeLen > n) break;
 
       const mergedSegs = segments.slice(i, i + mergeLen);

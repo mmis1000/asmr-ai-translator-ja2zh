@@ -85,6 +85,7 @@ export class LlmClient {
       repeat_penalty: this.config.repeatPenalty,
       n_predict: options?.nPredict ?? 8192,
       stop: STOP,
+      cache_prompt: false,
       ...(options?.seed !== undefined ? { seed: options.seed } : {}),
     };
 

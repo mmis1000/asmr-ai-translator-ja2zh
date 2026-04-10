@@ -62,7 +62,7 @@ function stripSpeakerPrefixes(entries: TranslationEntry[]): TranslationEntry[] {
 }
 
 /** Bump temperature by this amount on the first retry. */
-const TEMPERATURE_BUMP = 0.5;
+const TEMPERATURE_BUMP = 0.6;
 
 /** Tokens budgeted per segment for output generation. */
 const N_PREDICT_PER_SEGMENT = 400;

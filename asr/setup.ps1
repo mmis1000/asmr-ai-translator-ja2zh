@@ -11,37 +11,51 @@ if (-not (Get-Command "uv" -ErrorAction SilentlyContinue)) {
   exit 1
 }
 
-# 2. Download and extract CTranslate2 ROCm wheel
-$ZipUrl      = "https://github.com/OpenNMT/CTranslate2/releases/download/v4.7.1/rocm-python-wheels-Windows.zip"
-$ZipFile     = Join-Path $PSScriptRoot "rocm-python-wheels-Windows.zip"
-$ExtractPath = Join-Path $PSScriptRoot "rocm_wheels_tmp"
-$WheelName   = "ctranslate2-4.7.1-cp312-cp312-win_amd64.whl"
-$WheelDir    = Join-Path $PSScriptRoot "rocm_wheels"
-$WheelDest   = Join-Path $WheelDir $WheelName
+# 2. Download and extract CTranslate2 ROCm wheels (Windows + Linux).
+#    uv lock needs both local path sources in pyproject.toml even on one platform.
+$ZipUrlWin      = "https://github.com/OpenNMT/CTranslate2/releases/download/v4.7.1/rocm-python-wheels-Windows.zip"
+$ZipUrlLinux    = "https://github.com/OpenNMT/CTranslate2/releases/download/v4.7.1/rocm-python-wheels-Linux.zip"
+$ZipFileWin     = Join-Path $PSScriptRoot "rocm-python-wheels-Windows.zip"
+$ZipFileLinux   = Join-Path $PSScriptRoot "rocm-python-wheels-Linux.zip"
+$WheelDir       = Join-Path $PSScriptRoot "rocm_wheels"
+$WheelNameWin   = "ctranslate2-4.7.1-cp312-cp312-win_amd64.whl"
+$WheelNameLinux = "ctranslate2-4.7.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
 
-if (-not (Test-Path $WheelDest)) {
+function Ensure-CTranslate2WheelFromZip {
+  param(
+    [string]$ZipUrl,
+    [string]$ZipFile,
+    [string]$WheelName,
+    [string]$TempDir
+  )
+  $WheelDest = Join-Path $WheelDir $WheelName
+  if (Test-Path $WheelDest) {
+    return
+  }
   if (-not (Test-Path $ZipFile)) {
-    Write-Host "Downloading CTranslate2 ROCm wheels..."
+    Write-Host "Downloading $(Split-Path $ZipUrl -Leaf)..."
     (New-Object Net.WebClient).DownloadFile($ZipUrl, $ZipFile)
   }
-
-  if (Test-Path $ExtractPath) {
-    Remove-Item -Recurse -Force $ExtractPath
+  if (Test-Path $TempDir) {
+    Remove-Item -Recurse -Force $TempDir
   }
-  Expand-Archive -Path $ZipFile -DestinationPath $ExtractPath -Force
-
-  $WheelFile = Get-ChildItem -Path $ExtractPath -Filter $WheelName -Recurse | Select-Object -First 1
+  Expand-Archive -Path $ZipFile -DestinationPath $TempDir -Force
+  $WheelFile = Get-ChildItem -Path $TempDir -Filter $WheelName -Recurse | Select-Object -First 1
   if (-not $WheelFile) {
-    Write-Error "No matching CTranslate2 wheel found: $WheelName"
+    Write-Error "No matching CTranslate2 wheel found in zip: $WheelName"
     exit 1
   }
-
   New-Item -ItemType Directory -Path $WheelDir -Force | Out-Null
   Copy-Item $WheelFile.FullName $WheelDest
   Write-Host "Prepared CTranslate2 ROCm wheel: $WheelName"
-
-  Remove-Item -Recurse -Force $ExtractPath
+  Remove-Item -Recurse -Force $TempDir
 }
+
+New-Item -ItemType Directory -Path $WheelDir -Force | Out-Null
+$TempWin = Join-Path $PSScriptRoot "temp-ct2-win"
+$TempLinux = Join-Path $PSScriptRoot "temp-ct2-linux"
+Ensure-CTranslate2WheelFromZip -ZipUrl $ZipUrlWin -ZipFile $ZipFileWin -WheelName $WheelNameWin -TempDir $TempWin
+Ensure-CTranslate2WheelFromZip -ZipUrl $ZipUrlLinux -ZipFile $ZipFileLinux -WheelName $WheelNameLinux -TempDir $TempLinux
 
 # 3. Sync main dependencies
 Write-Host "Syncing main ASR dependencies (Transformers 5.x)..."

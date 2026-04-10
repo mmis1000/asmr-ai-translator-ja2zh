@@ -13,10 +13,11 @@ dependencies = [
     "torch",
     "torchaudio",
     "torchvision",
+    "triton==3.5.1+rocm7.2.1.gita272dfa8; sys_platform == 'linux'",
     # ROCm SDK
-    "rocm-sdk-core",
-    "rocm-sdk-libraries-custom",
-    "rocm",
+    "rocm-sdk-core; sys_platform == 'win32'",
+    "rocm-sdk-libraries-custom; sys_platform == 'win32'",
+    "rocm; sys_platform == 'win32'",
     # CTranslate2 ROCm (overrides CPU wheel pulled by faster-whisper)
     "ctranslate2",
     "transformers>=5.5.0",
@@ -26,10 +27,26 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-torch = { url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2/torch-2.9.1%2Brocmsdk20260116-cp312-cp312-win_amd64.whl" }
-torchaudio = { url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2/torchaudio-2.9.1%2Brocmsdk20260116-cp312-cp312-win_amd64.whl" }
-torchvision = { url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2/torchvision-0.24.1%2Brocmsdk20260116-cp312-cp312-win_amd64.whl" }
+torch = [
+    { url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2/torch-2.9.1%2Brocmsdk20260116-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32'" },
+    { url = "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/torch-2.9.1%2Brocm7.2.1.lw.gitff65f5bc-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux'" }
+]
+torchaudio = [
+    { url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2/torchaudio-2.9.1%2Brocmsdk20260116-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32'" },
+    { url = "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/torchaudio-2.9.0%2Brocm7.2.1.gite3c6ee2b-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux'" }
+]
+torchvision = [
+    { url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2/torchvision-0.24.1%2Brocmsdk20260116-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32'" },
+    { url = "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/torchvision-0.24.0%2Brocm7.2.1.gitb919bd0c-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux'" }
+]
+# PyPI has no ROCm Triton; Linux torch wheel requires this exact build (see torch METADATA Requires-Dist).
+triton = [
+    { url = "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/triton-3.5.1%2Brocm7.2.1.gita272dfa8-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux'" }
+]
 rocm-sdk-core = { url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2/rocm_sdk_core-7.2.0.dev0-py3-none-win_amd64.whl" }
 rocm-sdk-libraries-custom = { url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2/rocm_sdk_libraries_custom-7.2.0.dev0-py3-none-win_amd64.whl" }
 rocm = { url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2/rocm-7.2.0.dev0.tar.gz" }
-ctranslate2 = { path = "rocm_wheels/ctranslate2-4.7.1-cp312-cp312-win_amd64.whl" }
+ctranslate2 = [
+    { path = "rocm_wheels/ctranslate2-4.7.1-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32'" },
+    { path = "rocm_wheels/ctranslate2-4.7.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux'" }
+]

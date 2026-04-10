@@ -2,15 +2,22 @@ import type { Segment } from "../util/types.js";
 import { formatTranscriptionJson } from "./prompt-builder.js";
 
 // Character-budget windowing: grow each window until the estimated total
-// character count (fixed prompt overhead + transcription JSON) exceeds MAX_CHARS.
+// character count (fixed prompt overhead + transcription JSON) exceeds maxChars.
 //
 // The training pipeline (instruct-dataset-pipeline.ts) uses MAX_CHARS=5000 for the
 // COMBINED input+output budget per window (~3500 tokens at ~1.4 chars/token).
-// At inference we only count input here, so we use half that budget so the
-// combined (input + translation output) stays within max-seq-len=4096.
-// Measured ~1.6 chars/token for this content → MAX_CHARS=2500 ≈ 1562 input tokens,
-// leaving ~2534 tokens for output within 4096.
-const MAX_CHARS = 2500;
+// At inference we only count input here. The fine-tune target is total seq len 4096
+// (prompt + completion), so budgets here stay conservative even if llama-server
+// uses n_ctx=8192.
+//
+// Base: ~1.6 chars/token → rough input-side budget; completion stays under the 4096
+// training cap via translator.ts maxNPredict.
+//
+// Echo: real runs often land ~2–2.3k tokens total (prompt + completion) vs 4096 train
+// length — under-filled. Use a **larger** char budget than base so each window carries
+// more segments and moves closer to the training distribution (fewer HTTP round-trips).
+export const MAX_CHARS_BASE = 2500;
+export const MAX_CHARS_ECHO = 3500;
 const MIN_WINDOW = 3;
 
 export interface InferenceWindow {
@@ -32,7 +39,7 @@ export interface InferenceWindow {
 export function makeInferenceWindows(
   allSegments: Segment[],
   getOverheadChars: (segs: Segment[]) => number,
-  maxChars = MAX_CHARS,
+  maxChars = MAX_CHARS_BASE,
   minWindow = MIN_WINDOW,
 ): InferenceWindow[] {
   const windows: InferenceWindow[] = [];

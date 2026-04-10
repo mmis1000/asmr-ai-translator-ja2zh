@@ -8,7 +8,7 @@ import {
   filterGlossary,
   buildGlossaryJson,
 } from "./prompt-builder.js";
-import { makeInferenceWindows } from "./windowing.js";
+import { makeInferenceWindows, MAX_CHARS_BASE, MAX_CHARS_ECHO } from "./windowing.js";
 import { generateTranslationGrammar } from "./grammar-generator.js";
 
 const MAX_RETRIES = 3;
@@ -65,7 +65,40 @@ function stripSpeakerPrefixes(entries: TranslationEntry[]): TranslationEntry[] {
 const TEMPERATURE_BUMP = 0.6;
 
 /** Tokens budgeted per segment for output generation. */
-const N_PREDICT_PER_SEGMENT = 400;
+const N_PREDICT_PER_SEGMENT = 512;
+
+/**
+ * Rough chars per token for the built prompt string. `length/1.6` over-counts tokens vs
+ * llama.cpp’s tokenizer on JP+JSON (e.g. ~1763 tok for ~3.5k chars → ~2.0 chars/tok),
+ * which made `roomTrain` / `byRatio` too tight.
+ */
+const CHARS_PER_TOKEN_EST = 2.0;
+
+/**
+ * Max new tokens vs estimated prompt size — stops runaway loops without capping sane
+ * echo JSON (long `input` + translation). ~3.5× keeps headroom above typical completion.
+ */
+const MAX_GEN_TO_PROMPT_RATIO = 3.5;
+
+const TRAINING_CONTEXT_TOKENS = 4096;
+
+function estimatePromptTokens(prompt: string): number {
+  return Math.max(1, Math.ceil(prompt.length / CHARS_PER_TOKEN_EST));
+}
+
+function computeNPredict(
+  segments: Segment[],
+  prompt: string,
+  config: TranslatorConfig,
+): number {
+  const promptTok = estimatePromptTokens(prompt);
+  const bySegments = segments.length * N_PREDICT_PER_SEGMENT;
+  const byRatio = Math.ceil(promptTok * MAX_GEN_TO_PROMPT_RATIO);
+  const roomCtx = Math.max(0, config.contextSize - promptTok);
+  const roomTrain = Math.max(0, TRAINING_CONTEXT_TOKENS - promptTok);
+  const n = Math.min(bySegments, byRatio, roomCtx, roomTrain);
+  return Math.max(1, n);
+}
 
 export interface WindowResult {
   /** 1-based window index */
@@ -149,17 +182,17 @@ async function runLLMCore(
   promptBuilder: ReturnType<typeof getPromptBuilder>,
   grammar: string,
   client: LlmClient,
-  maxNPredict: number,
+  config: TranslatorConfig,
   temperature?: number | undefined,
   seed?: number | undefined,
   label?: string | undefined,
 ): Promise<TranslationEntry[]> {
-  const nPredict = Math.min(segments.length * N_PREDICT_PER_SEGMENT, maxNPredict);
   const filtered = filterGlossary(glossary, segments.map(s => s.text).join(""));
   const glossaryJson = buildGlossaryJson(filtered);
   const transcriptionJson = formatTranscriptionJson(segments);
   const userPrompt = promptBuilder(trackName, glossary.summary, glossaryJson, transcriptionJson);
   const prompt = buildChatPrompt(userPrompt);
+  const nPredict = computeNPredict(segments, prompt, config);
 
   const raw = await client.complete(prompt, {
     grammar,
@@ -186,18 +219,13 @@ export async function translateTrack(
   client: LlmClient,
 ): Promise<{ entries: TranslationEntry[]; windowResults: WindowResult[] }> {
   const promptBuilder = getPromptBuilder(config.locale, config.mode);
-  // Reserve a fixed overhead for the prompt (system text + transcription JSON ≈ 2048 tokens).
-  // The remainder is available for output. In echo mode the output echoes the source input back,
-  // so output tokens can be significantly larger than in base mode — we want the full remainder,
-  // not just half the context.
-  const PROMPT_OVERHEAD_TOKENS = 2048;
-  const maxNPredict = Math.max(config.contextSize - PROMPT_OVERHEAD_TOKENS, 512);
 
+  const windowCharBudget = config.mode === "echo" ? MAX_CHARS_ECHO : MAX_CHARS_BASE;
   const windows = makeInferenceWindows(segments, (segs) => {
     const jaText = segs.map(s => s.text).join("");
     const filtered = filterGlossary(glossary, jaText);
     return promptBuilder(trackName, glossary.summary, buildGlossaryJson(filtered), "[]").length;
-  });
+  }, windowCharBudget);
 
   if (windows.length === 0) {
     console.log(`  [translate] No windows generated (too few segments)`);
@@ -225,7 +253,7 @@ export async function translateTrack(
           // ── Attempt 1: standard run (seed for reproducibility if configured)
           const localParsed = await runLLMCore(
             win.segments, trackName, glossary, promptBuilder, grammar, client,
-            maxNPredict, undefined, config.seed, `translation-${trackName}-window${wi + 1}-attempt1`
+            config, undefined, config.seed, `translation-${trackName}-window${wi + 1}-attempt1`
           );
           parsed = localParsed.map(entry => ({
             ...entry,
@@ -238,7 +266,7 @@ export async function translateTrack(
           console.warn(`  [translate] Window ${wi + 1} retry with temperature ${bumpedTemp.toFixed(2)}`);
           const localParsed = await runLLMCore(
             win.segments, trackName, glossary, promptBuilder, grammar, client,
-            maxNPredict, bumpedTemp, config.seed, `translation-${trackName}-window${wi + 1}-attempt2`
+            config, bumpedTemp, config.seed, `translation-${trackName}-window${wi + 1}-attempt2`
           );
           parsed = localParsed.map(entry => ({
             ...entry,
@@ -257,8 +285,8 @@ export async function translateTrack(
           const chunkBGrammar = generateTranslationGrammar(chunkB, config.mode);
 
           const [resultA, resultB] = await Promise.all([
-            runLLMCore(chunkA, trackName, glossary, promptBuilder, chunkAGrammar, client, maxNPredict, undefined, config.seed, `translation-${trackName}-window${wi + 1}-attempt3-sub1`),
-            runLLMCore(chunkB, trackName, glossary, promptBuilder, chunkBGrammar, client, maxNPredict, undefined, config.seed, `translation-${trackName}-window${wi + 1}-attempt3-sub2`),
+            runLLMCore(chunkA, trackName, glossary, promptBuilder, chunkAGrammar, client, config, undefined, config.seed, `translation-${trackName}-window${wi + 1}-attempt3-sub1`),
+            runLLMCore(chunkB, trackName, glossary, promptBuilder, chunkBGrammar, client, config, undefined, config.seed, `translation-${trackName}-window${wi + 1}-attempt3-sub2`),
           ]);
 
           const restoreIds = (entries: TranslationEntry[]) =>
@@ -283,7 +311,7 @@ export async function translateTrack(
             const microGrammar = generateTranslationGrammar(micro, config.mode);
             try {
               const microResult = await runLLMCore(
-                micro, trackName, glossary, promptBuilder, microGrammar, client, maxNPredict, undefined, config.seed, `translation-${trackName}-window${wi + 1}-attempt4-sub${Math.floor(mi / MICRO_SIZE) + 1}`
+                micro, trackName, glossary, promptBuilder, microGrammar, client, config, undefined, config.seed, `translation-${trackName}-window${wi + 1}-attempt4-sub${Math.floor(mi / MICRO_SIZE) + 1}`
               );
               for (const entry of microResult) {
                 collected.push({

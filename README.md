@@ -4,6 +4,60 @@
 
 A CLI pipeline for transcribing and translating Japanese ASMR audio to Traditional or Simplified Chinese. It chains GPU-accelerated ASR (Whisper / SenseVoice / MMS / Qwen / Gemma) with a GGUF LLM for context-aware translation, optionally using DLSite metadata for a per-work glossary.
 
+## Available Models
+
+All models are fine-tuned from **Qwen3.5-9B** via LoRA on a curated ASMR subtitle-alignment dataset. Each is published as GGUF with multiple quantizations (`q4_k_m`, `q6_k`, `q8_0`, `bf16`).
+
+| Model | Language | Mode | HuggingFace |
+|-------|----------|------|-------------|
+| asmr-qwen3.5-9b-zh-tw-echo-gguf-v0.1 | Traditional Chinese | Echo | [mmis1000/asmr-qwen3.5-9b-zh-tw-echo-gguf-v0.1](https://huggingface.co/mmis1000/asmr-qwen3.5-9b-zh-tw-echo-gguf-v0.1) |
+| asmr-qwen3.5-9b-zh-cn-echo-gguf-v0.1 | Simplified Chinese | Echo | [mmis1000/asmr-qwen3.5-9b-zh-cn-echo-gguf-v0.1](https://huggingface.co/mmis1000/asmr-qwen3.5-9b-zh-cn-echo-gguf-v0.1) |
+| asmr-qwen3.5-9b-zh-tw-gguf-v0.1 | Traditional Chinese | Base | [mmis1000/asmr-qwen3.5-9b-zh-tw-gguf-v0.1](https://huggingface.co/mmis1000/asmr-qwen3.5-9b-zh-tw-gguf-v0.1) |
+| asmr-qwen3.5-9b-zh-cn-gguf-v0.1 | Simplified Chinese | Base | [mmis1000/asmr-qwen3.5-9b-zh-cn-gguf-v0.1](https://huggingface.co/mmis1000/asmr-qwen3.5-9b-zh-cn-gguf-v0.1) |
+
+### Echo mode vs Base mode
+
+The models come in two translation modes. Use `--mode echo` or `--mode base` to select.
+
+**Echo mode (recommended)** — the model "echoes" the source Japanese in an `"input"` field alongside each translated entry:
+
+```json
+{"ids": [1, 2], "input": "ねぇ、放課後、 一緒に帰らない?", "text": "欸，放學後，要不要一起回去？", "start": 3000, "end": 7000}
+```
+
+**Base mode** — traditional output with translation only:
+
+```json
+{"ids": [1, 2], "text": "欸，放學後，要不要一起回去？", "start": 3000, "end": 7000}
+```
+
+| | Echo mode | Base mode |
+|---|---|---|
+| **Hallucination resistance** | Strong — echoing the source anchors cross-attention and significantly reduces fabricated or omitted segments | Weaker — more prone to hallucinations and skipped segments on noisy ASR input |
+| **Translation accuracy** | Higher — the model attends to its own echoed source, keeping translations faithful | Good for clean input, but can drift when ASR is imperfect |
+| **Auditability** | `input` field lets you verify what the model actually "saw" for each segment | No source visibility in output |
+| **Output size** | Larger — every entry includes the full source text, roughly 1.5–2x more tokens | Smaller and faster to generate |
+| **Inference speed** | Slower due to longer output sequences | Faster |
+| **Best for** | Production use, noisy/real-world audio, quality-critical workflows | Quick previews, clean studio audio, bandwidth-constrained environments |
+
+### Quantization guide
+
+Each model is published with four quantization levels. Use the `:<quant>` suffix with `--hf-repo`:
+
+| Quantization | Suffix | Quality | VRAM (approx) | Use case |
+|---|---|---|---|---|
+| `bf16` | `:BF16` | Full precision, no loss | ~18 GB | Maximum quality, large GPU |
+| `q8_0` | `:Q8_0` | Near-lossless | ~10 GB | Recommended default |
+| `q6_k` | `:Q6_K` | High quality | ~7.5 GB | Good balance of quality and VRAM |
+| `q4_k_m` | `:Q4_K_M` | Good quality | ~5.5 GB | Constrained VRAM, acceptable quality |
+
+### Language selection
+
+- **`zh-tw`** (Traditional Chinese) — for audiences in Taiwan, Hong Kong, Macau. Uses the `--lang zh-tw` flag.
+- **`zh-cn`** (Simplified Chinese) — for audiences in Mainland China, Singapore. Uses the `--lang zh-cn` flag.
+
+The zh-tw and zh-cn models are trained independently on locale-specific ground truth, not simple character conversion. They produce natural phrasing for each variant.
+
 ## Requirements
 
 - **Node.js** 20+, **npm** (for the TypeScript CLI)
